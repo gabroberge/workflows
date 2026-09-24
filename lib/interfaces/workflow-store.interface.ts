@@ -1,0 +1,225 @@
+import type { SerializedWorkflowError } from './serialized-workflow-error.interface.js';
+import type {
+  WorkflowInstance,
+  WorkflowJournalEntry,
+  WorkflowStatus,
+  WorkflowWait,
+} from './workflow-instance.interface.js';
+
+/**
+ * Where workflow instances, their journals, their waits and the signals sent to them live.
+ * The package ships `InMemoryWorkflowStore` (the default, for development and tests); in
+ * production, write a provider on your database that implements this interface and registers
+ * itself with `WorkflowStorage.registerSource(this)` in its constructor.
+ *
+ * The README's "Implementing a store" documents every method: what it must do, what must be
+ * atomic, and the race each rule prevents. `workflowStoreContract()` from
+ * `@nestjs/workflows/testing` checks an implementation against it, races included.
+ *
+ * Four methods need more than a plain read or write: `claim` (a lock that skips rows other
+ * claims hold), `write` and `renew` (fenced by the lease token), and `signal` together with
+ * `write` when it registers waits (a lock that orders them, see `signal`). Everything else is
+ * safe to implement naively.
+ */
+export interface WorkflowStore {
+  // ---------------------------------------------------------------- instances
+
+  /**
+   * Inserts a `pending` instance, due at `now`, unless one with the same id exists. Returns the
+   * stored instance: the new one (`created: true`) or the existing one, unchanged
+   * (`created: false`). Must be atomic per id: of two concurrent calls, one creates.
+   */
+  create(instance: NewWorkflowInstance): Promise<{ instance: WorkflowInstance; created: boolean }>;
+  /**
+   * Optional: `create()` through the application's transaction, for
+   * `start(workflow, input, { transaction })`. `transaction` is what the application's ORM
+   * hands its transaction callback (a Drizzle `tx`, a TypeORM `EntityManager`...). Write only
+   * through it, so the instance commits or rolls back with the application's rows, and never
+   * catch a database error inside it (on PostgreSQL that aborts the transaction: use
+   * insert-or-ignore). Without this method, `start()` with a transaction throws.
+   */
+  createInTransaction?(transaction: unknown, instance: NewWorkflowInstance): Promise<{ instance: WorkflowInstance; created: boolean }>;
+  /**
+   * The instance with the waits its last suspension registered (`[]` when none), and its
+   * journal when `options.journal` is set, or `null` for an unknown id.
+   */
+  get(id: string, options?: { journal?: boolean }): Promise<WorkflowInstanceDetails | null>;
+  /** Instances matching every given filter, ordered by `createdAt`, then `id`; a page of them. */
+  list(query: WorkflowListQuery): Promise<WorkflowInstance[]>;
+  /**
+   * Sets `cancelRequested` and `cancelReason` on a `pending`, `running` or `suspended`
+   * instance whose `cancelRequested` is still false, makes it due now (`wakeAt` becomes `now`
+   * unless it is already due) and sets `updatedAt`. Returns whether it changed anything:
+   * `false` for an unknown id, a finished or compensating instance, or a repeated request.
+   * One conditional update: two concurrent requests accept one.
+   */
+  requestCancel(id: string, reason: string | null, now: number): Promise<boolean>;
+
+  // ---------------------------------------------------------------- signals
+
+  /**
+   * Records a signal under the next signal id and makes due now (`wakeAt = now` unless already
+   * due, and `updatedAt`) every `suspended` instance with a wait for the same name and exactly
+   * the same key. Returns the id and how many instances it woke.
+   *
+   * Signals must be serialized with each other and with `write()`s that register waits: take
+   * an exclusive lock before choosing the id and hold it until commit (the `write()` side takes
+   * it shared). That gives the two guarantees the engine relies on: signal ids become visible
+   * in id order, and a signal and a suspension of the same instance never interleave.
+   */
+  signal(signal: NewWorkflowSignal): Promise<{ id: number; woken: number }>;
+  /**
+   * Optional: `signal()` through the application's transaction, for
+   * `signal(signal, payload, { transaction })`, under the same rules as `createInTransaction()`.
+   * The lock is then held until the application's transaction ends. On PostgreSQL the
+   * transaction must be READ COMMITTED, or the wake-up can miss waits committed after its
+   * snapshot: refuse other isolation levels.
+   */
+  signalInTransaction?(transaction: unknown, signal: NewWorkflowSignal): Promise<{ id: number; woken: number }>;
+  /** Signals named `name` with exactly `key` and `afterId < id <= upToId`, by id. */
+  signals(query: WorkflowSignalQuery): Promise<WorkflowSignalRecord[]>;
+
+  // ---------------------------------------------------------------- the worker
+
+  /**
+   * Leases up to `limit` due instances to a worker, most overdue first. Due: status `pending`,
+   * `running`, `suspended` or `compensating`, `wakeAt <= now`, no lease or an expired one
+   * (`leaseUntil < now`), and a `workflow`/`version` pair in `workflows`. Each claimed instance
+   * gets `leaseToken = token`, `leaseOwner = owner`, `leaseUntil`, `runs + 1`,
+   * `updatedAt = now` and status `running` (a `compensating` one keeps its status).
+   *
+   * Two concurrent claims must never return the same instance: lock the candidates and skip
+   * those another claim holds (`FOR UPDATE SKIP LOCKED`). Also returns the last signal id,
+   * read after the claim, as the execution's signal cursor.
+   */
+  claim(request: WorkflowClaimRequest): Promise<WorkflowClaim>;
+  /**
+   * Extends the lease to `leaseUntil` if `token` is still the instance's lease token, and
+   * returns its `cancelRequested`, or `null` (changing nothing) if the lease is gone. One
+   * conditional update.
+   */
+  renew(id: string, token: string, leaseUntil: number): Promise<{ cancelRequested: boolean } | null>;
+  /**
+   * Every write by the worker that holds the lease: journal entries, a status change, the
+   * outcome, and handing the instance back. All or nothing, in one transaction, and only while
+   * `token` is the instance's lease token: otherwise write nothing and return `false`.
+   * See `WorkflowWrite` for what each field does.
+   */
+  write(id: string, token: string, write: WorkflowWrite): Promise<boolean>;
+}
+
+/** `WorkflowStore.get()`'s result, and `WorkflowClient.getStatus()`'s. */
+export interface WorkflowInstanceDetails extends WorkflowInstance {
+  /** Signals the instance waits for, if suspended in `waitForSignal()`. */
+  waits: WorkflowWait[];
+  /** With `{ journal: true }`: every step, sleep, wait and compensation, in first-write order. */
+  journal?: WorkflowJournalEntry[];
+}
+
+export interface NewWorkflowInstance {
+  id: string;
+  workflow: string;
+  version: number;
+  input: unknown;
+  /**
+   * `createdAt`, `updatedAt` and `wakeAt`. The new instance also gets `signalCursor` = the
+   * last signal id (signals sent after it started can match its waits), `runs: 0`, no lease
+   * and no cancel request.
+   */
+  now: number;
+}
+
+/** What `WorkflowStore.list()` receives: validated and defaulted by the engine. */
+export interface WorkflowListQuery {
+  /** Any of these statuses (never empty). */
+  status?: WorkflowStatus[];
+  workflow?: string;
+  version?: number;
+  limit: number;
+  offset: number;
+}
+
+export interface NewWorkflowSignal {
+  name: string;
+  /** Correlation key; `null` for a signal sent without one. Matches waits with exactly this key. */
+  key: string | null;
+  payload: unknown;
+  now: number;
+}
+
+export interface WorkflowSignalQuery {
+  name: string;
+  /** Exactly this key: `null` matches only signals sent without one. */
+  key: string | null;
+  afterId: number;
+  upToId: number;
+}
+
+/** A signal as stored. */
+export interface WorkflowSignalRecord {
+  id: number;
+  name: string;
+  key: string | null;
+  payload: unknown;
+  createdAt: number;
+}
+
+export interface WorkflowClaimRequest {
+  /** The worker's id, for `leaseOwner`. */
+  owner: string;
+  /** A new token for this claim; every write under the lease presents it. */
+  token: string;
+  now: number;
+  leaseUntil: number;
+  /** At least 1. */
+  limit: number;
+  /** The workflow versions this worker runs (at least one). Leave the others to other workers. */
+  workflows: Array<{ name: string; version: number }>;
+}
+
+export interface WorkflowClaim {
+  /** The claimed instances, as updated by the claim. */
+  instances: WorkflowInstance[];
+  /** The last signal id: the highest id `signal()` has returned, or 0. */
+  lastSignalId: number;
+}
+
+/**
+ * One write by the lease holder (`WorkflowStore.write()`). In one transaction:
+ *
+ * 1. If `release.waits` is not empty, take the signal lock in shared mode (see
+ *    `WorkflowStore.signal()`), before anything else.
+ * 2. Lock the instance row if its lease token is `token`; if not, write nothing, return `false`.
+ * 3. Upsert `entries` by name.
+ * 4. Set `status`, `output` and `error` when present (`undefined` leaves them as they are).
+ * 5. With `release`: replace the instance's waits with `release.waits`, clear `leaseToken` and
+ *    `leaseUntil` (keep `leaseOwner`), and set `wakeAt`: `now` if a signal with an id above
+ *    `release.signalCursor` matches one of the new waits (name and exact key), or if the
+ *    instance has `cancelRequested` and the new status is `suspended`; otherwise
+ *    `release.wakeAt`.
+ * 6. Set `updatedAt = now` when anything besides the journal changed.
+ */
+export interface WorkflowWrite {
+  now: number;
+  /**
+   * Journal entries, each with a name unique within the write. An entry replaces the stored
+   * entry with the same name entirely; a new name goes after every name the instance already
+   * has, in array order. `get(id, { journal: true })` returns them in that first-write order,
+   * with `null` and `undefined` fields kept apart (store each entry as one JSON document).
+   */
+  entries: WorkflowJournalEntry[];
+  status?: WorkflowStatus;
+  output?: unknown;
+  error?: SerializedWorkflowError | null;
+  /** Hand the instance back: parked (`suspended`), finished, or due again at once. */
+  release?: WorkflowRelease;
+}
+
+export interface WorkflowRelease {
+  /** When the instance is next due; `null`: only a signal or a cancel can wake it. */
+  wakeAt: number | null;
+  /** The waits to register, replacing the previous ones (`[]` clears them). */
+  waits: WorkflowWait[];
+  /** The execution's signal cursor (`WorkflowClaim.lastSignalId`): signals above it weren't seen. */
+  signalCursor: number;
+}
