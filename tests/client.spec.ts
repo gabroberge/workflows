@@ -84,8 +84,35 @@ class Notify {
   }
 }
 
+/** Starts three instances from a step whose first attempt fails after starting them. */
+@Workflow('spawn')
+class Spawn {
+  static results: Array<Array<{ id: string; created: boolean }>> = [];
+
+  constructor(private readonly workflowClient: WorkflowClient) {}
+
+  async run(ctx: WorkflowContext) {
+    await ctx.step(
+      'spawn',
+      async ({ attempt }) => {
+        const started = [
+          await this.workflowClient.start(Echo, { part: 1, attempt }),
+          await this.workflowClient.start(Echo, { part: 2, attempt }),
+          await this.workflowClient.start(Echo, { part: 3 }, { id: 'explicit-part-3' }),
+        ];
+        Spawn.results.push(started.map(({ id, created }) => ({ id, created })));
+        if (attempt === 1) {
+          throw new Error('the warehouse hung up');
+        }
+      },
+      { retry: { attempts: 2, backoff: { delay: '1s' } } },
+    );
+  }
+}
+
 beforeEach(() => {
   Notify.results = [];
+  Spawn.results = [];
 });
 
 describe('start()', () => {
@@ -163,6 +190,30 @@ describe('start()', () => {
     expect(b.id).not.toBe(a.id);
     expect([a.created, b.created]).toEqual([true, true]);
     expect(await node.client.list()).toHaveLength(2);
+  });
+});
+
+describe('start() inside a step', () => {
+  it('derives the id from the step: a retried step gets its instances back, two starts get two, and an explicit id wins', async () => {
+    const node = await start([Spawn, Echo]);
+    await node.client.start(Spawn, undefined, { id: 's-1' });
+    await node.worker.drain();
+    clock.advance('1s');
+    await node.worker.drain();
+
+    const [first, retried] = Spawn.results;
+    expect(first!.map((s) => s.created)).toEqual([true, true, true]);
+    expect(retried).toEqual(first!.map((s) => ({ ...s, created: false })));
+    expect(first!.map((s) => s.id)).toEqual([JSON.stringify(['s-1:spawn', 'echo', 1]), JSON.stringify(['s-1:spawn', 'echo', 2]), 'explicit-part-3']);
+
+    // The retry's input differs (attempt 2): the first one wins, instead of a conflict failing the step.
+    expect(await node.client.getStatus('s-1')).toMatchObject({ status: 'completed' });
+    const echoes = await node.client.list({ workflow: 'echo' });
+    expect(echoes.map((i) => i.input).sort((a: any, b: any) => a.part - b.part)).toEqual([{ part: 1, attempt: 1 }, { part: 2, attempt: 1 }, { part: 3 }]);
+
+    // Outside a step, the same call starts another instance.
+    expect(await node.client.start(Echo, { part: 1, attempt: 1 })).toMatchObject({ created: true });
+    expect(await node.client.list({ workflow: 'echo' })).toHaveLength(4);
   });
 });
 

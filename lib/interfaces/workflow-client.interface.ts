@@ -4,7 +4,11 @@ export interface StartWorkflowOptions {
   /**
    * Instance id; default a random UUID. Starting twice with the same id (same
    * workflow and input) returns the existing instance instead of a second one,
-   * so derive it from the business key: `order-${orderId}`.
+   * so derive it from the business key: `order-${orderId}`. Inside a workflow
+   * step, a start without an id gets one derived from the step's
+   * `idempotencyKey`, the workflow's name and how many instances of it the step
+   * started before, so a retried step gets its instances back (with the input
+   * they were first started with) instead of starting new ones.
    */
   id?: string;
   /**

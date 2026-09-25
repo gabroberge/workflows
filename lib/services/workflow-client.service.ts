@@ -9,7 +9,7 @@ import type { WorkflowInput } from '../interfaces/workflow-runner.interface.js';
 import { normalize } from './workflow-execution.service.js';
 import { signalName, type WorkflowSignal } from '../signals/workflow.signal.js';
 import { WorkflowStorage } from '../storage/workflow.storage.js';
-import { stepSignalId } from '../utils/step-scope.util.js';
+import { stepSignalId, stepStartId } from '../utils/step-scope.util.js';
 import type { WorkflowInstanceDetails, WorkflowStore } from '../interfaces/workflow-store.interface.js';
 import { WorkflowRegistry } from './workflow-registry.service.js';
 import { WorkflowWorker } from './workflow-worker.service.js';
@@ -47,11 +47,14 @@ export class WorkflowClient {
    * Creates an instance, or returns the existing one with the same id and
    * input (`created: false`). Throws `WorkflowIdConflictError` for the same id
    * with a different workflow or input. With `transaction`, the instance is
-   * created in your transaction and commits or rolls back with it.
+   * created in your transaction and commits or rolls back with it. Inside a
+   * workflow step, a start without an `id` gets one derived from the step, so a
+   * retried step gets its instance back instead of starting another.
    */
   async start<W>(workflow: Type<W> | string, input: WorkflowInput<W>, options: StartWorkflowOptions = {}): Promise<WorkflowStartResult> {
     const { name, version } = this.registry.resolve(workflow as Type<unknown> | string, options.version);
-    const id = options.id ?? randomUUID();
+    const derived = options.id === undefined ? stepStartId(name) : undefined;
+    const id = options.id ?? derived ?? randomUUID();
     if (typeof id !== 'string' || id.length === 0) {
       throw new TypeError(`Invalid workflow instance id ${JSON.stringify(id)}. Use a non-empty string, such as \`order-\${orderId}\`.`);
     }
@@ -68,8 +71,9 @@ export class WorkflowClient {
       if (instance.workflow !== name) {
         throw new WorkflowIdConflictError(`Instance "${id}" already exists for workflow "${instance.workflow}", not "${name}".`);
       }
-      // A store may read an `undefined` input back as `null`.
-      if (canonical(instance.input ?? null) !== canonical(normalized ?? null)) {
+      // A store may read an `undefined` input back as `null`. A retried step may build its input
+      // anew (a timestamp in it, say): with an id derived from the step, the first input wins.
+      if (derived === undefined && canonical(instance.input ?? null) !== canonical(normalized ?? null)) {
         throw new WorkflowIdConflictError(`Instance "${id}" of "${name}" already exists with a different input.`);
       }
     } else {
