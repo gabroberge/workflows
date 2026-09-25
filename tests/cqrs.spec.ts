@@ -335,7 +335,7 @@ describe('the publisher', () => {
     expect(await signalsSent(app.store, 'packing.labelled', null)).toEqual([]);
   });
 
-  it('starts the workflow from an aggregate’s commit(), and reports its failures on the UnhandledExceptionBus', async () => {
+  it('starts the workflow from an aggregate’s commit(), warns once per event class, and reports failures on the UnhandledExceptionBus', async () => {
     class Order extends AggregateRoot {
       /** An aggregate may have a field of this name: it is never taken for the dispatcher context's. */
       readonly transaction = 'not a transaction';
@@ -350,6 +350,8 @@ describe('the publisher', () => {
     }
 
     const app = await boot({ workflows: [OrderFulfilmentWorkflow], providers: shared() });
+    const warnings: string[] = [];
+    app.moduleRef.useLogger({ log() {}, error() {}, warn: (message: string) => void warnings.push(message) });
     const createInTransaction = vi.spyOn(app.store, 'createInTransaction');
     const unhandled: UnhandledExceptionInfo<unknown>[] = [];
     app.moduleRef.get(UnhandledExceptionBus).subscribe((info) => unhandled.push(info));
@@ -369,6 +371,16 @@ describe('the publisher', () => {
     expect(unhandled[0].cause).toBeInstanceOf(OrderPlacedEvent);
     expect(unhandled[0].exception).toBeInstanceOf(WorkflowIdConflictError);
 
+    // An event no workflow maps is none of the module's business.
+    const ready = publisher.mergeObjectContext(new Order('o-2'));
+    ready.apply(new OrderReadyEvent('o-2'));
+    ready.commit();
+    expect(warnings).toEqual([
+      "OrderPlacedEvent starts or signals workflows, and an aggregate's commit() published it: commit() can't pass your " +
+        "transaction or wait for the workflows, so a crash or a failed write loses the start or signal. Publish the aggregate's " +
+        'events with eventBus.publishAll(aggregate.getUncommittedEvents(), { transaction }), then call aggregate.uncommit(). ' +
+        '(Logged once per event class.)',
+    ]);
   });
 
   it('reads the transaction from a plain dispatcher context, and from nothing else', async () => {

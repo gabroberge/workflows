@@ -25,6 +25,8 @@ export class WorkflowEventPublisher implements IEventPublisher, OnModuleInit, On
   private readonly logger = new Logger('WorkflowsCqrsModule');
   private readonly inner: IEventPublisher;
   private routes?: Map<Function, WorkflowEventTargets>;
+  /** Event classes an aggregate's commit() published, warned about once each. */
+  private readonly committedByAggregates = new Set<Function>();
 
   constructor(
     private readonly eventBus: EventBus,
@@ -100,6 +102,7 @@ export class WorkflowEventPublisher implements IEventPublisher, OnModuleInit, On
     // An aggregate's commit() drops the promise that publish() returns: report its failures
     // the way cqrs reports a failing event handler, rather than as an unhandled rejection.
     if (isAggregate(context)) {
+      this.warnAboutCommit(events);
       delivered.catch((exception: unknown) => this.report(failure.event ?? events[0], exception));
     }
 
@@ -178,6 +181,28 @@ export class WorkflowEventPublisher implements IEventPublisher, OnModuleInit, On
     }
 
     return writes;
+  }
+
+  /**
+   * The one lossy path this publisher can recognize: an aggregate merged with `EventPublisher`
+   * passes itself as the dispatcher context. (`@Publishable()` aggregates pass nothing, like any
+   * other untransacted publish, so they can't be told apart.) A warning, not an error: the start
+   * or signal still happens, only without the transaction and without anyone awaiting it.
+   */
+  private warnAboutCommit(events: object[]): void {
+    for (const event of events) {
+      if (!this.isRouted(event) || this.committedByAggregates.has(event.constructor)) {
+        continue;
+      }
+
+      this.committedByAggregates.add(event.constructor);
+      this.logger.warn(
+        `${event.constructor.name} starts or signals workflows, and an aggregate's commit() published it: commit() ` +
+          "can't pass your transaction or wait for the workflows, so a crash or a failed write loses the start or " +
+          "signal. Publish the aggregate's events with eventBus.publishAll(aggregate.getUncommittedEvents(), { transaction }), " +
+          'then call aggregate.uncommit(). (Logged once per event class.)',
+      );
+    }
   }
 
   private report(event: object, exception: unknown): void {
