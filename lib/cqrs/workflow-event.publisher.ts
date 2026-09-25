@@ -43,7 +43,14 @@ export class WorkflowEventPublisher implements IEventPublisher, OnModuleInit, On
 
   onModuleInit(): void {
     const routes = this.table();
+    // A process that publishes mapped events without registering their workflows starts and
+    // signals nothing, and would otherwise do so silently.
     if (routes.size === 0) {
+      this.logger.warn(
+        'WorkflowsCqrsModule is imported, but no registered workflow maps an event with @StartOn() or @SignalOn(), so ' +
+          'events start and signal no workflow in this process. Register the workflow classes in every process that ' +
+          'publishes their events, with worker: false in WorkflowsModule.forRoot() if the process runs none.',
+      );
       return;
     }
 

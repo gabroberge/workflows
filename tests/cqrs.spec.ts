@@ -3,7 +3,7 @@
  * checks, the decorators' arguments and types, how the publisher wraps the one before it, which
  * versions and declarations an event reaches, and what happens to an aggregate's `commit()`.
  */
-import { Injectable, type OnModuleInit, type Provider, type Type } from '@nestjs/common';
+import { Injectable, Logger, type OnModuleInit, type Provider, type Type } from '@nestjs/common';
 import {
   AggregateRoot,
   AsyncContext,
@@ -160,6 +160,24 @@ describe('startup checks', () => {
       moduleRef,
       'WorkflowsCqrsModule: EventBus.publisher was replaced (by KafkaPublisher) after WorkflowsCqrsModule installed its publisher',
     );
+  });
+
+  it('warns when no registered workflow maps an event: the process would start and signal nothing', async () => {
+    const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => {});
+    try {
+      await boot({ workflows: [] });
+      expect(warn).toHaveBeenCalledWith(
+        'WorkflowsCqrsModule is imported, but no registered workflow maps an event with @StartOn() or @SignalOn(), so ' +
+          'events start and signal no workflow in this process. Register the workflow classes in every process that ' +
+          'publishes their events, with worker: false in WorkflowsModule.forRoot() if the process runs none.',
+      );
+
+      warn.mockClear();
+      await boot({ workflows: [OrderFulfilmentWorkflow], providers: shared() });
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('checks the decorators’ arguments at once', () => {
