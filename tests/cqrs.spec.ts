@@ -344,9 +344,23 @@ describe('the publisher', () => {
 
     await app.eventBus.publish(new OrderPlacedEvent('o-1', 2499), { transaction: tx } satisfies WorkflowDispatcherContext);
     await app.eventBus.publish(new OrderPlacedEvent('o-2', 2499), { tenant: 'cats' });
+
+    // An aggregate's events, published by the command handler in its transaction instead of commit().
+    class Order extends AggregateRoot {
+      place(id: string, total: number) {
+        this.apply(new OrderPlacedEvent(id, total));
+      }
+    }
+    const order = app.moduleRef.get(EventPublisher).mergeObjectContext(new Order());
+    order.place('o-3', 1599);
+    await app.eventBus.publishAll(order.getUncommittedEvents(), { transaction: tx });
+    order.uncommit();
+
     expect(createInTransaction.mock.calls.map(([transaction, instance]) => [transaction, instance.id])).toEqual([
       [tx, fulfilmentId('o-1')],
+      [tx, fulfilmentId('o-3')],
     ]);
+    expect(order.getUncommittedEvents()).toEqual([]);
   });
 });
 
