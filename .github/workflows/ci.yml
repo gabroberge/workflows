@@ -50,8 +50,10 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm install
+      # The devDependencies pin NestJS 12 packages (@nestjs/platform-fastify 12 peers @nestjs/core ^12), so the
+      # swap relaxes peer checks, as the other repos' CI does. Every @nestjs package the tests load is swapped.
       - name: Install NestJS ${{ matrix.nestjs-version }}
-        run: npm install --no-save @nestjs/common@${{ matrix.nestjs-version }} @nestjs/core@${{ matrix.nestjs-version }} @nestjs/testing@${{ matrix.nestjs-version }} @nestjs/platform-express@${{ matrix.nestjs-version }} @nestjs/cqrs@${{ matrix.nestjs-version }}
+        run: npm install --no-save --legacy-peer-deps @nestjs/common@${{ matrix.nestjs-version }} @nestjs/core@${{ matrix.nestjs-version }} @nestjs/testing@${{ matrix.nestjs-version }} @nestjs/platform-express@${{ matrix.nestjs-version }} @nestjs/platform-fastify@${{ matrix.nestjs-version }} @nestjs/cqrs@${{ matrix.nestjs-version }}
       - name: Typecheck
         run: npx tsc -p tsconfig.json --noEmit
       - name: e2e tests
