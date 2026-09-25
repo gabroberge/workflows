@@ -15,3 +15,13 @@ export interface Order {
   total: number;
   status: OrderStatus;
 }
+
+export class PlaceOrderDto {
+  userId!: string;
+  items!: OrderItem[];
+}
+
+export interface FulfilmentResult {
+  chargeId: string;
+  trackingNumber: string;
+}
