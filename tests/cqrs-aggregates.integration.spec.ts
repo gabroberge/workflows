@@ -155,6 +155,11 @@ describe('aggregates’ events', () => {
     order.place(2499);
     expect(order.commit()).toBeUndefined(); // nothing to await
     await waitFor(async () => (await node.client.getStatus(fulfilmentId('o-1'))) !== null);
+    // commit() empties the array it hands over as soon as publishAll() returns: the events still reach the
+    // in-memory reactions, after the start.
+    await waitFor(() => ledger.saga.length === 1);
+    expect(ledger.handled).toEqual([{ event: 'OrderPlacedEvent', orderId: 'o-1' }]);
+    expect(ledger.saga).toEqual(['o-1']);
 
     const again = node.publisher.mergeObjectContext(new Order('o-1'));
     again.place(9999); // another input for the same business key: the start fails, and nobody awaits it
@@ -185,6 +190,9 @@ describe('aggregates’ events', () => {
     order.place(2499);
     expect(order.commit()).toBeUndefined();
     await waitFor(async () => (await node.client.getStatus(fulfilmentId('o-1'))) !== null);
+    await waitFor(() => ledger.saga.length === 1);
+    expect(ledger.handled).toEqual([{ event: 'OrderPlacedEvent', orderId: 'o-1' }]);
+    expect(ledger.saga).toEqual(['o-1']);
 
     const again = new PublishableOrder('o-1');
     again.place(9999);

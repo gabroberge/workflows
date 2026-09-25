@@ -83,17 +83,19 @@ export class WorkflowEventPublisher implements IEventPublisher, OnModuleInit, On
   }
 
   publishAll<TEvent extends IEvent>(events: TEvent[], dispatcherContext?: unknown, asyncContext?: AsyncContext): unknown {
-    const all = events ?? [];
-    const forward = () =>
+    const forward = (all: TEvent[]) =>
       this.inner.publishAll
         ? this.inner.publishAll(all, dispatcherContext, asyncContext)
         : all.map((event) => this.inner.publish(event, dispatcherContext, asyncContext));
-    if (!all.some((event) => this.isRouted(event))) {
-      return forward();
+    if (!events?.some((event) => this.isRouted(event))) {
+      return forward(events ?? []);
     }
 
+    // Copied before anything is awaited: an aggregate's commit() hands over its own array and
+    // empties it as soon as this returns, before the events are forwarded.
+    const all = [...events];
     return this.deliver(all, dispatcherContext, async () => {
-      const result = forward();
+      const result = forward(all);
       return Array.isArray(result) ? Promise.all(result) : result;
     });
   }
