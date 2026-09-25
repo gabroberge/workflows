@@ -32,16 +32,17 @@ export interface WorkflowWorkerOptions {
  * turns a check off.
  */
 export interface WorkflowJournalLimits {
-  /** Log a warning, and emit `journal-large`, once, when an instance's journal grows past this many entries. Default 1,000. */
+  /** Log a warning, and emit `journal-large`, once, when an instance's journal reaches this many entries. Default 1,000. */
   warnEntries?: number;
-  /** The same, past this many bytes. Default 1,000,000 (1 MB). */
+  /** The same, at this many bytes. Default 1,000,000 (1 MB). */
   warnBytes?: number;
   /**
-   * Fail the instance before it records a new entry past this many: it compensates and ends as
-   * `failed` with a `WorkflowJournalLimitError`. Compensations may still record theirs. Default 10,000.
+   * Fail the instance before it records a new entry once its journal holds this many: it
+   * compensates and ends as `failed` with a `WorkflowJournalLimitError`. Compensations may still
+   * record theirs. Default 10,000.
    */
   maxEntries?: number;
-  /** The same, past this many bytes. Default 10,000,000 (10 MB). */
+  /** The same, at this many bytes. Default 10,000,000 (10 MB). */
   maxBytes?: number;
 }
 
