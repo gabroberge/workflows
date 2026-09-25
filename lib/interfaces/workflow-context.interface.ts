@@ -88,7 +88,10 @@ export interface WaitForSignalOptions<T> {
   timeout?: Duration;
 }
 
-/** The API a workflow's `run()` receives. See the README's "Determinism rules". */
+/**
+ * The API a workflow's `run()` receives. `run()` executes again from the top every time an instance
+ * resumes: https://docs.nestjs.com/reliability/workflows#rules-for-workflow-code.
+ */
 export interface WorkflowContext {
   readonly workflowId: string;
   readonly workflowName: string;

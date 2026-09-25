@@ -1,6 +1,6 @@
 /**
- * Deploying new workflow code while instances are in flight, as the README's "Versioning"
- * section plans a rolling deploy: pods with the old code, pods with both versions, pods with
+ * Deploying new workflow code while instances are in flight, as "Deploy changes safely"
+ * (https://docs.nestjs.com/reliability/workflows#deploy-changes-safely) plans a rolling deploy: pods with the old code, pods with both versions, pods with
  * only the new one, and a change shipped without a new version.
  */
 import { Body, Controller, Get, HttpCode, Inject, NotFoundException, Param, Post, Query, type Type } from '@nestjs/common';

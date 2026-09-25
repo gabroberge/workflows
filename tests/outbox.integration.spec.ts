@@ -1,5 +1,5 @@
 /**
- * Workflows next to the transactional outbox (`@nestjs/outbox`), as the README pairs them: a
+ * Workflows next to the transactional outbox (`@nestjs/outbox`, https://docs.nestjs.com/reliability/outbox): a
  * checkout that saves the order, starts its workflow and adds its message in one transaction,
  * and an outbox handler that turns a message into a signal, with the handler's inbox absorbing
  * the redelivery. On SQL stores both stores are the tutorials' Drizzle recipes on the same

@@ -1,5 +1,6 @@
 /**
- * The README's API walkthrough as an application serves it, on Express and on Fastify: the
+ * The docs page's walkthrough (https://docs.nestjs.com/reliability/workflows) as an application
+ * serves it, on Express and on Fastify: the
  * orders routes start, inspect and cancel a fulfilment, the carrier webhook signals it, and
  * the worker (drained, or polling) runs it on the test store.
  */

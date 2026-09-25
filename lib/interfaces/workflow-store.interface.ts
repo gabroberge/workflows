@@ -12,14 +12,16 @@ import type {
  * production, write a provider on your database that implements this interface and registers
  * itself with `WorkflowStorage.registerSource(this)` in its constructor.
  *
- * The README's "Implementing a store" documents every method: what it must do, what must be
- * atomic, and the race each rule prevents. `workflowStoreContract()` from
- * `@nestjs/workflows/testing` checks an implementation against it, races included.
+ * "The store contract" (https://docs.nestjs.com/reliability/workflows#the-store-contract) sums up
+ * every method; each one's JSDoc here says what it must do, what must be atomic, and the race
+ * each rule prevents. `workflowStoreContract()` from `@nestjs/workflows/testing` checks an
+ * implementation against it, races included.
  *
  * Four methods need more than a plain read or write: `claim` (a lock that skips rows other
  * claims hold), `write` and `renew` (fenced by the lease token), and `signal` together with
- * `write` when it registers waits (a lock that orders them, see `signal`). Everything else is
- * safe to implement naively.
+ * `write` when it registers waits (a lock that orders them, see `signal`). `reopen` and `purge`
+ * re-check their conditions on the rows they change. Everything else is safe to implement
+ * naively.
  */
 export interface WorkflowStore {
   // ---------------------------------------------------------------- instances

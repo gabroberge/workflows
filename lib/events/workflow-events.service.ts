@@ -9,7 +9,7 @@ import { channelFor } from './workflows.channels.js';
  * (`nestjs:workflows:<type>`), process-wide, where tracing tools (NestJS Observe,
  * OpenTelemetry) subscribe without Nest. An instance maps onto one trace: the
  * instance is the root span, each execution a child span, each step attempt a
- * span inside it (see README "Observability").
+ * span inside it (https://docs.nestjs.com/reliability/workflows#events).
  */
 @Injectable()
 export class WorkflowEvents implements OnApplicationShutdown {

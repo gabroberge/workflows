@@ -1,7 +1,8 @@
 /**
- * Starting workflows from a scheduled job, as the README recommends instead of a scheduler,
- * guarded by `@OnOneInstance()` from `@nestjs/locks` on every pod of the app.
- * The job is triggered the way its README allows besides `@Cron()`: a plain call from an
+ * Scheduled jobs next to workflows, guarded by `@OnOneInstance()` from `@nestjs/locks`
+ * (https://docs.nestjs.com/reliability/locks) on every pod of the app: one that starts a
+ * workflow per day, and the retention job of the workflows page's production checklist. The
+ * jobs are triggered the way the locks page allows besides `@Cron()`: a plain call from an
  * admin route. The per-day instance id makes a second run of the same day a no-op anyway.
  */
 import { Controller, Inject, Injectable, Param, Post } from '@nestjs/common';

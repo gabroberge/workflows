@@ -52,7 +52,7 @@ export class FulfilDto {
   email!: string;
 }
 
-/** The README's orders controller: start idempotently by order id, a status view, cancel. */
+/** The tutorial's orders controller: start idempotently by order id, a status view, cancel. */
 @Controller()
 export class OrdersController {
   constructor(private readonly workflowClient: WorkflowClient) {}
@@ -79,7 +79,7 @@ export class OrdersController {
   }
 }
 
-/** The README's carrier webhook: a durable signal keyed by the order. */
+/** The tutorial's carrier webhook: a durable signal keyed by the order. */
 @Controller('webhooks/carrier')
 export class CarrierWebhookController {
   constructor(private readonly workflowClient: WorkflowClient) {}

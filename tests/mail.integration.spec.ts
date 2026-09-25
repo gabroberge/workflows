@@ -1,6 +1,6 @@
 /**
- * A workflow step that sends mail with `@nestjs/mail`, as its README says a
- * caller that retries does: the step's idempotency key as the mail's, one attempt per call
+ * A workflow step that sends mail with `@nestjs/mail`, as its docs page
+ * (https://docs.nestjs.com/application/mail) says a caller that retries does: the step's idempotency key as the mail's, one attempt per call
  * (`retry: false`), and the step retrying only what `MailError#permanent` says can succeed.
  */
 import { Body, Controller, Inject, Injectable, Post } from '@nestjs/common';
