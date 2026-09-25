@@ -108,8 +108,10 @@ export class WorkflowEventPublisher implements IEventPublisher, OnModuleInit, On
     const failure: { event?: object } = {};
     const delivered = this.write(events, transactionOf(context), failure).then(forward);
 
-    // An aggregate's commit() drops the promise that publish() returns: report its failures
-    // the way cqrs reports a failing event handler, rather than as an unhandled rejection.
+    // An aggregate's commit() without a dispatcher context: before @nestjs/cqrs 12.1 it drops the
+    // promise this returns, and from 12.1 on nothing may await it either. Report its failures the
+    // way cqrs reports a failing event handler, rather than as an unhandled rejection. (Given a
+    // context, commit() passes it instead of the aggregate, and its caller awaits the result.)
     if (isAggregate(context)) {
       this.warnAboutCommit(events);
       delivered.catch((exception: unknown) => this.report(failure.event ?? events[0], exception));
@@ -194,9 +196,9 @@ export class WorkflowEventPublisher implements IEventPublisher, OnModuleInit, On
 
   /**
    * The one lossy path this publisher can recognize: an aggregate merged with `EventPublisher`
-   * passes itself as the dispatcher context. (`@Publishable()` aggregates pass nothing, like any
-   * other untransacted publish, so they can't be told apart.) A warning, not an error: the start
-   * or signal still happens, only without the transaction and without anyone awaiting it.
+   * passes itself as the dispatcher context when `commit()` is given none. (`@Publishable()`
+   * aggregates pass nothing, like any other untransacted publish, so they can't be told apart.)
+   * A warning, not an error: the start or signal still happens, only outside the transaction.
    */
   private warnAboutCommit(events: object[]): void {
     for (const event of events) {
@@ -206,18 +208,22 @@ export class WorkflowEventPublisher implements IEventPublisher, OnModuleInit, On
 
       this.committedByAggregates.add(event.constructor);
       this.logger.warn(
-        `${event.constructor.name} starts or signals workflows, and an aggregate's commit() published it: commit() ` +
-          "can't pass your transaction or wait for the workflows, so a crash or a failed write loses the start or " +
-          "signal. Publish the aggregate's events with eventBus.publishAll(aggregate.getUncommittedEvents(), { transaction }), " +
-          'then call aggregate.uncommit(). (Logged once per event class.)',
+        `${event.constructor.name} starts or signals workflows, and an aggregate's commit() published it without ` +
+          'a transaction: the start or signal is written outside your transaction, so it outlives a rollback of your ' +
+          "writes, and a crash before it's written loses it. Pass your transaction and await the result: " +
+          'await aggregate.commit({ transaction }) (@nestjs/cqrs 12.1 or later). With older versions, publish the ' +
+          "aggregate's events with eventBus.publishAll(aggregate.getUncommittedEvents(), { transaction }), then call " +
+          'aggregate.uncommit(). (Logged once per event class.)',
       );
     }
   }
 
   private report(event: object, exception: unknown): void {
     this.logger.error(
-      `Publishing ${event.constructor.name} from an aggregate's commit() failed, and commit() doesn't wait for it. ` +
-        'Publish the aggregate\'s events with eventBus.publishAll(aggregate.getUncommittedEvents(), { transaction }) to handle it.',
+      `Publishing ${event.constructor.name} from an aggregate's commit() without a transaction failed. To handle ` +
+        'the failure in your command handler, and roll its transaction back, await aggregate.commit({ transaction }) ' +
+        "(@nestjs/cqrs 12.1 or later). With older versions, await eventBus.publishAll(aggregate.getUncommittedEvents(), " +
+        '{ transaction }), then call aggregate.uncommit().',
       exception instanceof Error ? exception.stack : String(exception),
     );
     this.unhandledExceptionBus.publish({ cause: event, exception });

@@ -369,7 +369,12 @@ describe('the publisher', () => {
 
     const app = await boot({ workflows: [OrderFulfilmentWorkflow], providers: shared() });
     const warnings: string[] = [];
-    app.moduleRef.useLogger({ log() {}, error() {}, warn: (message: string) => void warnings.push(message) });
+    const errors: string[] = [];
+    app.moduleRef.useLogger({
+      log() {},
+      error: (message: string) => void errors.push(message),
+      warn: (message: string) => void warnings.push(message),
+    });
     const createInTransaction = vi.spyOn(app.store, 'createInTransaction');
     const unhandled: UnhandledExceptionInfo<unknown>[] = [];
     app.moduleRef.get(UnhandledExceptionBus).subscribe((info) => unhandled.push(info));
@@ -377,7 +382,7 @@ describe('the publisher', () => {
 
     const order = publisher.mergeObjectContext(new Order('o-1'));
     order.place(2499);
-    order.commit(); // returns nothing to await
+    order.commit(); // not awaited (before @nestjs/cqrs 12.1, it returns nothing to await)
     await waitFor(async () => (await app.client.getStatus(fulfilmentId('o-1'))) !== null);
     expect(createInTransaction).not.toHaveBeenCalled();
 
@@ -388,16 +393,23 @@ describe('the publisher', () => {
     await waitFor(() => unhandled.length === 1);
     expect(unhandled[0].cause).toBeInstanceOf(OrderPlacedEvent);
     expect(unhandled[0].exception).toBeInstanceOf(WorkflowIdConflictError);
+    expect(errors).toEqual([
+      "Publishing OrderPlacedEvent from an aggregate's commit() without a transaction failed. To handle the failure in " +
+        'your command handler, and roll its transaction back, await aggregate.commit({ transaction }) (@nestjs/cqrs 12.1 ' +
+        'or later). With older versions, await eventBus.publishAll(aggregate.getUncommittedEvents(), { transaction }), then ' +
+        'call aggregate.uncommit().',
+    ]);
 
     // An event no workflow maps is none of the module's business.
     const ready = publisher.mergeObjectContext(new Order('o-2'));
     ready.apply(new OrderReadyEvent('o-2'));
     ready.commit();
     expect(warnings).toEqual([
-      "OrderPlacedEvent starts or signals workflows, and an aggregate's commit() published it: commit() can't pass your " +
-        "transaction or wait for the workflows, so a crash or a failed write loses the start or signal. Publish the aggregate's " +
-        'events with eventBus.publishAll(aggregate.getUncommittedEvents(), { transaction }), then call aggregate.uncommit(). ' +
-        '(Logged once per event class.)',
+      "OrderPlacedEvent starts or signals workflows, and an aggregate's commit() published it without a transaction: the " +
+        "start or signal is written outside your transaction, so it outlives a rollback of your writes, and a crash before it's " +
+        'written loses it. Pass your transaction and await the result: await aggregate.commit({ transaction }) (@nestjs/cqrs ' +
+        "12.1 or later). With older versions, publish the aggregate's events with eventBus.publishAll(" +
+        'aggregate.getUncommittedEvents(), { transaction }), then call aggregate.uncommit(). (Logged once per event class.)',
     ]);
   });
 
