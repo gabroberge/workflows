@@ -329,14 +329,19 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
     // A cancel noticed during the run (a heartbeat, or cancel() in this process) stopped it.
     // Checked before a suspension: a parked sleep, wait or retry backoff left next to it
     // will never resume, so the instance compensates now instead of parking first and being
-    // woken again for that.
+    // woken again for that. The same goes for a run timeout.
     if (!outcome.ok && isWorkflowInterrupt(outcome.error) && outcome.error.reason === 'cancel') {
       const current = await this.store.get(instance.id);
       return this.compensate(exec, instance, cancelled(current?.cancelReason ?? null), false);
     }
+    if (!outcome.ok && isWorkflowInterrupt(outcome.error) && outcome.error.reason === 'timeout') {
+      return this.compensate(exec, instance, timedOut(instance), false);
+    }
 
     if (exec.suspension) {
-      const { wakeAt, waits } = exec.suspension;
+      const { waits } = exec.suspension;
+      // Parked no later than the run timeout, so a sleep or wait past it can't outlive it.
+      const wakeAt = instance.deadline === null ? exec.suspension.wakeAt : Math.min(exec.suspension.wakeAt ?? instance.deadline, instance.deadline);
       const ok = await this.write(instance, {
         entries: exec.drainBuffer(),
         status: 'suspended',
@@ -509,4 +514,13 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
 
 function cancelled(reason: string | null): SerializedWorkflowError {
   return { name: 'WorkflowCancelledError', message: reason ?? 'Cancelled.' };
+}
+
+function timedOut(instance: ClaimedWorkflowInstance): SerializedWorkflowError {
+  return {
+    name: 'WorkflowTimeoutError',
+    message:
+      `Instance "${instance.id}" of workflow "${instance.workflow}@${instance.version}" did not finish within its timeout ` +
+      `(its deadline was ${new Date(instance.deadline!).toISOString()}).`,
+  };
 }

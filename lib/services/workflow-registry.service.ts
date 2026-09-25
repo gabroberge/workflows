@@ -64,7 +64,7 @@ export class WorkflowRegistry {
    */
   resolve(workflow: Type<unknown> | string, version?: number): WorkflowMetadata {
     let name: string;
-    let fallback: number | undefined;
+    let fallback: WorkflowMetadata | undefined;
     if (typeof workflow === 'string') {
       name = workflow;
     } else {
@@ -74,24 +74,25 @@ export class WorkflowRegistry {
       }
       name = meta.name;
       // A class this process does not register (an API pod starting work for
-      // a worker pod) still knows its own version.
-      fallback = meta.version;
+      // a worker pod) still knows its own version and timeout.
+      fallback = meta;
     }
 
     if (version !== undefined) {
       if (!Number.isInteger(version) || version < 1) {
         throw new TypeError(`Invalid version ${version} for workflow "${name}". Use a positive integer.`);
       }
-      return { name, version };
+      const timeout = this.get(name, version)?.timeout ?? (fallback?.version === version ? fallback.timeout : undefined);
+      return { name, version, timeout };
     }
 
     const def = this.latest(name);
     if (def) {
-      return { name: def.name, version: def.version };
+      return { name: def.name, version: def.version, timeout: def.timeout };
     }
 
     if (fallback !== undefined) {
-      return { name, version: fallback };
+      return { name, version: fallback.version, timeout: fallback.timeout };
     }
     throw new WorkflowNotFoundError(
       `Workflow "${name}" is not registered in this application. Register it, or pass { version } to start it from a process that does not run it.`,

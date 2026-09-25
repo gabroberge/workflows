@@ -1,4 +1,5 @@
 import { applyDecorators, Injectable, SetMetadata } from '@nestjs/common';
+import { runTimeoutMs } from '../utils/duration.util.js';
 import { WORKFLOW_METADATA } from '../workflows.constants.js';
 import type {
   WorkflowMetadata,
@@ -20,5 +21,6 @@ export function Workflow(name: string, options: WorkflowDecoratorOptions = {}): 
     throw new TypeError(`Invalid version ${version} for workflow "${name}". Use a positive integer.`);
   }
 
-  return applyDecorators(Injectable(), SetMetadata(WORKFLOW_METADATA, { name, version } satisfies WorkflowMetadata));
+  const timeout = options.timeout === undefined ? undefined : runTimeoutMs(options.timeout, `workflow "${name}"`);
+  return applyDecorators(Injectable(), SetMetadata(WORKFLOW_METADATA, { name, version, timeout } satisfies WorkflowMetadata));
 }

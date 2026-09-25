@@ -24,6 +24,11 @@ export interface WorkflowInstance {
   leaseUntil: number | null;
   cancelRequested: boolean;
   cancelReason: string | null;
+  /**
+   * When the run timeout passes (`@Workflow(name, { timeout })` or `start()`'s `timeout`), or
+   * `null` for none.
+   */
+  deadline: number | null;
   /** Signals with an id above this one can match the instance's waits. */
   signalCursor: number;
   /** Number of executions (claims) so far. */

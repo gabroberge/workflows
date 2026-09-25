@@ -696,3 +696,126 @@ describe('retry settings', () => {
     ]);
   });
 });
+
+describe('run timeouts', () => {
+  @Workflow('await-approval', { timeout: '1h' })
+  class AwaitApproval {
+    constructor(@Inject(World) private readonly world: World) {}
+
+    async run(ctx: WorkflowContext) {
+      await ctx.step('reserve', () => this.world.record('reserve', ''), { compensate: () => this.world.record('release', '') });
+      return ctx.waitForSignal('approval', 'approve');
+    }
+  }
+
+  it('stores the deadline, parks a wait without a timeout until it, and then compensates and fails, across a restart', async () => {
+    let node = await start([AwaitApproval]);
+    const t0 = clock.now();
+    await node.client.start(AwaitApproval, undefined, { id: 'a-1' });
+    await node.worker.drain();
+    expect(await node.client.getStatus('a-1')).toMatchObject({ status: 'suspended', deadline: t0 + 3_600_000, wakeAt: t0 + 3_600_000 });
+
+    node = await restart(node, [AwaitApproval]);
+    clock.advance('59m');
+    expect(await node.worker.drain()).toBe(0);
+    clock.advance('1m');
+    await node.worker.drain();
+
+    expect(await node.client.getStatus('a-1', { journal: true })).toMatchObject({
+      status: 'failed',
+      error: {
+        name: 'WorkflowTimeoutError',
+        message: `Instance "a-1" of workflow "await-approval@1" did not finish within its timeout (its deadline was ${new Date(t0 + 3_600_000).toISOString()}).`,
+      },
+      journal: [
+        { name: 'reserve', status: 'completed' },
+        { name: 'approval', status: 'cancelled' },
+        { name: '$compensate:reserve', status: 'completed' },
+      ],
+    });
+    expect(world.ops()).toEqual(['reserve', 'release']);
+    expect(node.events.map((e) => e.type)).toEqual(['workflow-resumed', 'workflow-compensating', 'step-compensated', 'workflow-failed']);
+  });
+
+  it('lets an instance that finishes in time complete, and a signal wake it before the deadline', async () => {
+    const node = await start([AwaitApproval]);
+    await node.client.start(AwaitApproval, undefined, { id: 'a-1' });
+    await node.worker.drain();
+    clock.advance('59m');
+    await node.client.signal('approve', 'yes');
+    await node.worker.drain();
+
+    expect(await node.client.getStatus('a-1')).toMatchObject({ status: 'completed', output: 'yes' });
+    expect(world.ops()).toEqual(['reserve']);
+  });
+
+  it("takes start()'s timeout over the decorator's, and caps a longer sleep at the deadline", async () => {
+    @Workflow('nap', { timeout: '30d' })
+    class Nap {
+      async run(ctx: WorkflowContext) {
+        await ctx.sleep('week', '7d');
+        return 'rested';
+      }
+    }
+
+    const node = await start([Nap]);
+    const t0 = clock.now();
+    await node.client.start(Nap, undefined, { id: 'short', timeout: '1d' });
+    await node.client.start(Nap, undefined, { id: 'long' });
+    await node.worker.drain();
+    expect(await node.client.getStatus('short')).toMatchObject({ deadline: t0 + 86_400_000, wakeAt: t0 + 86_400_000 });
+    expect(await node.client.getStatus('long')).toMatchObject({ deadline: t0 + 30 * 86_400_000, wakeAt: t0 + 7 * 86_400_000 });
+
+    clock.advance('7d');
+    await node.worker.drain();
+    expect(await node.client.getStatus('short')).toMatchObject({ status: 'failed', error: { name: 'WorkflowTimeoutError' } });
+    expect(await node.client.getStatus('long')).toMatchObject({ status: 'completed', output: 'rested' });
+  });
+
+  it('lets a step that runs past the deadline finish, and stops at the next ctx call', async () => {
+    @Workflow('slow-export', { timeout: '10m' })
+    class SlowExport {
+      constructor(@Inject(World) private readonly world: World) {}
+
+      async run(ctx: WorkflowContext) {
+        await ctx.step('export', () => {
+          clock.advance('15m');
+          this.world.record('export', '');
+        }, { compensate: () => this.world.record('delete-export', '') });
+        await ctx.step('publish', () => this.world.record('publish', ''));
+      }
+    }
+
+    const node = await start([SlowExport]);
+    await node.client.start(SlowExport, undefined, { id: 's-1' });
+    await node.worker.drain();
+
+    expect(await node.client.getStatus('s-1', { journal: true })).toMatchObject({
+      status: 'failed',
+      error: { name: 'WorkflowTimeoutError' },
+      journal: [{ name: 'export', status: 'completed' }, { name: '$compensate:export', status: 'completed' }],
+    });
+    expect(world.ops()).toEqual(['export', 'delete-export']);
+  });
+
+  it('times out an instance no worker claimed before its deadline without running a step', async () => {
+    const node = await start([AwaitApproval]);
+    await node.client.start(AwaitApproval, undefined, { id: 'late', timeout: '1m' });
+    clock.advance('2m');
+    await node.worker.drain();
+
+    expect(await node.client.getStatus('late', { journal: true })).toMatchObject({ status: 'failed', error: { name: 'WorkflowTimeoutError' }, journal: [] });
+    expect(world.ops()).toEqual([]);
+  });
+
+  it('rejects a timeout that is not a positive duration, before creating anything', async () => {
+    expect(() => Workflow('zero', { timeout: 0 })).toThrow(new TypeError('Invalid timeout 0 for workflow "zero". Use a positive duration, such as "30d".'));
+    expect(() => Workflow('soon', { timeout: 'soon' as never })).toThrow('Invalid timeout "soon" for workflow "soon".');
+
+    const node = await start([AwaitApproval]);
+    await expect(node.client.start(AwaitApproval, undefined, { timeout: '-1m' as never })).rejects.toThrow(
+      new TypeError('Invalid timeout "-1m" for start(). Use a positive duration, such as "30d".'),
+    );
+    expect(await node.client.list()).toEqual([]);
+  });
+});

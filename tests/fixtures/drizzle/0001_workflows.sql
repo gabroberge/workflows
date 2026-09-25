@@ -12,6 +12,7 @@ CREATE TABLE "workflow_instances" (
 	"lease_until" bigint,
 	"cancel_requested" boolean DEFAULT false NOT NULL,
 	"cancel_reason" text,
+	"deadline" bigint,
 	"signal_cursor" bigint NOT NULL,
 	"runs" integer DEFAULT 0 NOT NULL,
 	"created_at" bigint NOT NULL,

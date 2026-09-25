@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Inject, Injectable, type Type } from '@nestjs/common';
 import { systemClock } from '../utils/clock.util.js';
+import { runTimeoutMs } from '../utils/duration.util.js';
 import type { WorkflowClock } from '../interfaces/workflow-clock.interface.js';
 import { WorkflowIdConflictError } from '../errors/workflow-id-conflict.error.js';
 import { WorkflowNotFoundError } from '../errors/workflow-not-found.error.js';
@@ -52,7 +53,7 @@ export class WorkflowClient {
    * retried step gets its instance back instead of starting another.
    */
   async start<W>(workflow: Type<W> | string, input: WorkflowInput<W>, options: StartWorkflowOptions = {}): Promise<WorkflowStartResult> {
-    const { name, version } = this.registry.resolve(workflow as Type<unknown> | string, options.version);
+    const { name, version, timeout } = this.registry.resolve(workflow as Type<unknown> | string, options.version);
     const derived = options.id === undefined ? stepStartId(name) : undefined;
     const id = options.id ?? derived ?? randomUUID();
     if (typeof id !== 'string' || id.length === 0) {
@@ -60,7 +61,9 @@ export class WorkflowClient {
     }
 
     const normalized = normalize(input);
-    const data = { id, workflow: name, version, input: normalized, now: this.clock.now() };
+    const timeoutMs = options.timeout === undefined ? timeout : runTimeoutMs(options.timeout, 'start()');
+    const now = this.clock.now();
+    const data = { id, workflow: name, version, input: normalized, deadline: timeoutMs === undefined ? null : now + timeoutMs, now };
     // Nothing is awaited before the store's call: on a driver whose transactions are
     // synchronous, its statements must run before the application's transaction callback returns.
     const { instance, created } = await (options.transaction === undefined

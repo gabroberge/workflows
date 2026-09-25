@@ -1,5 +1,5 @@
 {
-  "id": "edc823a7-52ef-49e7-8a70-cb71edae5a10",
+  "id": "9c9bbc98-71b5-499a-940e-210170cce580",
   "prevId": "aae1f06b-1318-499b-ae7a-26eaa6c95080",
   "version": "7",
   "dialect": "postgresql",
@@ -127,6 +127,12 @@
         "cancel_reason": {
           "name": "cancel_reason",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "deadline": {
+          "name": "deadline",
+          "type": "bigint",
           "primaryKey": false,
           "notNull": false
         },

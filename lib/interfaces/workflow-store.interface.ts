@@ -127,6 +127,8 @@ export interface NewWorkflowInstance {
   workflow: string;
   version: number;
   input: unknown;
+  /** The instance's `deadline`: when its run timeout passes, or `null`. Stored as is. */
+  deadline: number | null;
   /**
    * `createdAt`, `updatedAt` and `wakeAt`. The new instance also gets `signalCursor` = the
    * last signal id (signals sent after it started can match its waits), `runs: 0`, no lease

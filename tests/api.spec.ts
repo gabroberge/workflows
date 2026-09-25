@@ -177,7 +177,7 @@ describe('module registration', () => {
 describe('WorkflowClient.list()', () => {
   it('validates the page and returns nothing for an empty status filter', async () => {
     const node = await start([]);
-    await node.store.create({ id: 'a', workflow: 'w', version: 1, input: null, now: 0 });
+    await node.store.create({ id: 'a', workflow: 'w', version: 1, input: null, deadline: null, now: 0 });
 
     expect(await node.client.list({ status: [] })).toEqual([]);
     expect(await node.client.list({ status: 'pending' })).toMatchObject([{ id: 'a' }]);

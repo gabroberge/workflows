@@ -25,3 +25,18 @@ export function toMs(duration: Duration): number {
 
   return Math.round(Number(match[1]) * UNITS[match[2]]);
 }
+
+/** A workflow's run timeout in milliseconds: a zero one would time out before the first step. */
+export function runTimeoutMs(timeout: Duration, owner: string): number {
+  let ms: number;
+  try {
+    ms = toMs(timeout);
+  } catch {
+    ms = 0;
+  }
+
+  if (ms <= 0) {
+    throw new TypeError(`Invalid timeout ${JSON.stringify(timeout)} for ${owner}. Use a positive duration, such as "30d".`);
+  }
+  return ms;
+}

@@ -95,6 +95,7 @@ export class InMemoryWorkflowStore implements WorkflowStore {
       leaseUntil: null,
       cancelRequested: false,
       cancelReason: null,
+      deadline: i.deadline,
       signalCursor: this.lastSignalId(),
       runs: 0,
       createdAt: i.now,

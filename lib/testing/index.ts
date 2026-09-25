@@ -64,7 +64,7 @@ export function workflowStoreContract(
 
   add('create() inserts a pending instance once, and returns the stored one for an existing id', async (t) => {
     const input = { title: "O'Reilly — Designing Data-Intensive Applications ü 🚀", qty: 2, nested: [null, { a: true }], empty: '' };
-    const first = await t.store.create({ id: 'order-1', workflow: 'order-fulfilment', version: 3, input, now: 1_000 });
+    const first = await t.store.create({ id: 'order-1', workflow: 'order-fulfilment', version: 3, input, deadline: null, now: 1_000 });
     expect(first, {
       created: true,
       instance: {
@@ -79,6 +79,7 @@ export function workflowStoreContract(
         leaseUntil: null,
         cancelRequested: false,
         cancelReason: null,
+        deadline: null,
         signalCursor: 0,
         runs: 0,
         createdAt: 1_000,
@@ -87,14 +88,18 @@ export function workflowStoreContract(
     }, 'the new instance');
     absent(first.instance.output, 'output of a new instance', { orNull: true });
 
-    const again = await t.store.create({ id: 'order-1', workflow: 'other', version: 1, input: 'different', now: 2_000 });
+    const again = await t.store.create({ id: 'order-1', workflow: 'other', version: 1, input: 'different', deadline: null, now: 2_000 });
     expect(again, { created: false, instance: first.instance }, 'the existing instance, unchanged');
     expect(await t.store.get('order-1'), { ...first.instance, waits: [] }, 'get()');
     equal(await t.store.get('missing'), null, 'get() of an unknown id');
 
-    equal((await t.store.create({ id: 'null-input', workflow: 'w', version: 1, input: null, now: 0 })).instance.input, null, 'a null input');
-    absent((await t.store.create({ id: 'no-input', workflow: 'w', version: 1, input: undefined, now: 0 })).instance.input, 'an undefined input', { orNull: true });
+    equal((await t.store.create({ id: 'null-input', workflow: 'w', version: 1, input: null, deadline: null, now: 0 })).instance.input, null, 'a null input');
+    absent((await t.store.create({ id: 'no-input', workflow: 'w', version: 1, input: undefined, deadline: null, now: 0 })).instance.input, 'an undefined input', { orNull: true });
     equal((await t.store.get('order-1', { journal: true }))?.journal, [], 'the journal of a new instance');
+
+    const timed = await t.store.create({ id: 'timed', workflow: 'w', version: 1, input: null, deadline: 86_401_000, now: 1_000 });
+    expect(timed.instance, { deadline: 86_401_000 }, 'a deadline');
+    expect(await t.store.get('timed'), { deadline: 86_401_000 }, 'a deadline, read back');
   });
 
   add('create() starts the signal cursor at the last signal sent before the instance', async (t) => {
@@ -388,7 +393,7 @@ export function workflowStoreContract(
       const { createInTransaction, signalInTransaction } = requireTransactionMethods(t.store);
       await rejects(
         transaction(async (tx) => {
-          expect(await createInTransaction(tx, { id: 'rolled-back', workflow: 'order-fulfilment', version: 1, input: 1, now: 1 }), { created: true }, 'created in the transaction');
+          expect(await createInTransaction(tx, { id: 'rolled-back', workflow: 'order-fulfilment', version: 1, input: 1, deadline: null, now: 1 }), { created: true }, 'created in the transaction');
           await signalInTransaction(tx, { name: 'go', key: 'x', dedupeId: null, payload: 1, now: 1 });
           throw new Error('payment declined');
         }),
@@ -401,8 +406,8 @@ export function workflowStoreContract(
       await t.claim(1, { token: 't' });
       await t.store.write('waiting', 't', { now: 1, entries: [], status: 'suspended', release: { wakeAt: null, waits: [{ signal: 'go', key: 'w' }], signalCursor: 0 } });
       const results = await transaction(async (tx) => [
-        await createInTransaction(tx, { id: 'committed', workflow: 'order-fulfilment', version: 1, input: { a: 1 }, now: 2 }),
-        await createInTransaction(tx, { id: 'committed', workflow: 'order-fulfilment', version: 1, input: { a: 2 }, now: 3 }),
+        await createInTransaction(tx, { id: 'committed', workflow: 'order-fulfilment', version: 1, input: { a: 1 }, deadline: 5_000, now: 2 }),
+        await createInTransaction(tx, { id: 'committed', workflow: 'order-fulfilment', version: 1, input: { a: 2 }, deadline: null, now: 3 }),
         await signalInTransaction(tx, { name: 'go', key: 'w', dedupeId: null, payload: 'p', now: 4 }),
       ] as const);
 
@@ -600,7 +605,7 @@ export function workflowStoreContract(
     });
 
     add('concurrent create() and requestCancel() of one id: one wins', async (t) => {
-      const created = await Promise.all(Array.from({ length: 8 }, (_, i) => jitter().then(() => t.store.create({ id: 'same', workflow: 'w', version: 1, input: i, now: i }))));
+      const created = await Promise.all(Array.from({ length: 8 }, (_, i) => jitter().then(() => t.store.create({ id: 'same', workflow: 'w', version: 1, input: i, deadline: null, now: i }))));
       equal(created.filter((r) => r.created).length, 1, 'created once');
       const winner = created.find((r) => r.created)!.instance;
       equal(created.filter((r) => !isDeepStrictEqual(r.instance.input, winner.input)).length, 0, 'every call returns the stored instance');
@@ -644,7 +649,7 @@ class Harness {
   constructor(readonly store: WorkflowStore) {}
 
   create(id: string, now = 0, workflow = 'order-fulfilment', version = 1) {
-    return this.store.create({ id, workflow, version, input: { id }, now });
+    return this.store.create({ id, workflow, version, input: { id }, deadline: null, now });
   }
 
   claim(

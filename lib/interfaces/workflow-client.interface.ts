@@ -1,3 +1,4 @@
+import type { Duration } from '../utils/duration.util.js';
 import type { WorkflowInstance, WorkflowStatus } from './workflow-instance.interface.js';
 
 export interface StartWorkflowOptions {
@@ -17,6 +18,12 @@ export interface StartWorkflowOptions {
    * Starting by name a workflow this process does not register requires it.
    */
   version?: number;
+  /**
+   * How long the instance may run, overriding the workflow's `@Workflow(name, { timeout })`:
+   * past it, the instance compensates and ends as `failed` with a `WorkflowTimeoutError`.
+   * Counted from this call; ignored when the instance already exists.
+   */
+  timeout?: Duration;
   /**
    * Your ORM's transaction: the `tx` (or `EntityManager`, `Transaction`...) your transaction
    * callback receives. The instance is created in it, so it exists if and only if your

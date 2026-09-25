@@ -837,6 +837,15 @@ export class WorkflowExecution {
     if (this.cancelRequested) {
       throw this.interrupt('cancel');
     }
+    // Only new work stops: a replay to compensate never gets here.
+    if (this.pastDeadline()) {
+      throw this.interrupt('timeout');
+    }
+  }
+
+  /** Whether the instance's run timeout has passed. */
+  pastDeadline(): boolean {
+    return this.instance.deadline !== null && this.deps.clock.now() >= this.instance.deadline;
   }
 
   /** No new step starts once the execution is suspending or `run()` has settled. */

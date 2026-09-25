@@ -227,6 +227,7 @@ export class DrizzleWorkflowStore implements WorkflowStore {
         version: i.version,
         status: 'pending',
         input: i.input,
+        deadline: i.deadline,
         wakeAt: i.now,
         // Signals sent from now on can match the new instance's waits.
         signalCursor: sql`(SELECT coalesce(max(${signals.id}), 0) FROM ${signals})`,

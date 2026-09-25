@@ -5,6 +5,8 @@ export type InterruptReason =
   | 'halt'
   /** `WorkflowClient.cancel()` was accepted while the run was executing. */
   | 'cancel'
+  /** The instance's run timeout passed. */
+  | 'timeout'
   /** Another worker took over the instance; nothing this run does is recorded. */
   | 'lease-lost'
   /** The application is shutting down; the instance is handed back. */
