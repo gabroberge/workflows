@@ -1,5 +1,5 @@
 export interface OrderItem {
-  isbn: string;
+  productId: string;
   quantity: number;
   /** Unit price in cents. */
   price: number;

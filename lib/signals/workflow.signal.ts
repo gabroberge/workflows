@@ -5,7 +5,7 @@
  * misspelled on one side, and the payload is type-checked on both.
  *
  * @example
- * export const shipmentDelivered = new WorkflowSignal<ShipCoEvent>('shipment.delivered');
+ * export const shipmentDelivered = new WorkflowSignal<CarrierEvent>('shipment.delivered');
  */
 export class WorkflowSignal<T = unknown> {
   /** Type-only: the payload type. Never set at runtime. */
