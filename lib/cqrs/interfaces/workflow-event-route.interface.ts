@@ -15,5 +15,6 @@ export interface WorkflowSignalRoute {
   event: Type<object>;
   signal: string;
   key?: (event: object) => string;
+  id?: (event: object) => string;
   payload?: (event: object) => unknown;
 }

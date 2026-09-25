@@ -15,6 +15,7 @@ import {
   type InterruptReason,
 } from '../errors/workflow-interrupt.error.js';
 import { serializeError } from '../utils/serialize-error.util.js';
+import { runInStepScope } from '../utils/step-scope.util.js';
 import type { SerializedWorkflowError } from '../interfaces/serialized-workflow-error.interface.js';
 import type {
   Journaled,
@@ -693,7 +694,7 @@ export class WorkflowExecution {
       },
     };
 
-    const run = Promise.resolve().then(() => this.insideStep.run(name, () => fn(ctx)));
+    const run = Promise.resolve().then(() => runInStepScope(ctx.idempotencyKey, () => this.insideStep.run(name, () => fn(ctx))));
     return Promise.race([run, watchdog]).finally(() => {
       settled = true;
       clearTimeout(overall);

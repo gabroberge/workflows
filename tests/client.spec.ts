@@ -57,6 +57,37 @@ class Listen {
   }
 }
 
+/** Sends four signals from a step whose first attempt fails after sending them. */
+@Workflow('notify')
+class Notify {
+  static results: boolean[][] = [];
+
+  constructor(private readonly workflowClient: WorkflowClient) {}
+
+  async run(ctx: WorkflowContext) {
+    await ctx.step(
+      'notify',
+      async ({ attempt }) => {
+        const sent = [
+          await this.workflowClient.signal('ping', `one: attempt ${attempt}`, { key: 'k' }),
+          await this.workflowClient.signal('ping', `two: attempt ${attempt}`, { key: 'k' }),
+          await this.workflowClient.signal('ping', `three: attempt ${attempt}`, { key: 'j' }),
+          await this.workflowClient.signal('pong', `explicit: attempt ${attempt}`, { id: 'pong-1' }),
+        ];
+        Notify.results.push(sent.map((result) => result.created));
+        if (attempt === 1) {
+          throw new Error('the mail server hung up');
+        }
+      },
+      { retry: { attempts: 2, backoff: { delay: '1s' } } },
+    );
+  }
+}
+
+beforeEach(() => {
+  Notify.results = [];
+});
+
 describe('start()', () => {
   it('treats the same input with its keys in another order as the same start', async () => {
     const node = await start([Echo]);
@@ -200,6 +231,62 @@ describe('signal()', () => {
     const second = await node.client.signal('value', 2, { key: 'zero' });
     expect(second.signalId).toBeGreaterThan(first.signalId);
     expect(second.woken).toBe(0);
+  });
+
+  it('stores a signal with an id once per name, returns the first one for a repeat, and refuses the id for another key', async () => {
+    const node = await start([Listen]);
+    await node.client.start(Listen, undefined, { id: 'l-1' });
+    await node.worker.drain();
+
+    const first = await node.client.signal('value', 0, { key: 'zero', id: 'evt-1' });
+    expect(first).toMatchObject({ woken: 1, created: true });
+    // A redelivery with another payload: the first one stays.
+    expect(await node.client.signal('value', 99, { key: 'zero', id: 'evt-1' })).toEqual({ signalId: first.signalId, woken: 0, created: false });
+    await expect(node.client.signal('value', 1, { key: 'false', id: 'evt-1' })).rejects.toThrow(
+      new WorkflowIdConflictError('Signal id "evt-1" of "value" was already used with key "zero", not key "false".'),
+    );
+    await expect(node.client.signal('value', 1, { id: 'evt-1' })).rejects.toThrow('was already used with key "zero", not no key.');
+    expect(await node.client.signal('other', 1, { key: 'zero', id: 'evt-1' })).toMatchObject({ created: true });
+
+    await node.worker.drain();
+    expect(await node.store.signals({ name: 'value', key: 'zero', afterId: 0, upToId: Number.MAX_SAFE_INTEGER })).toEqual([
+      expect.objectContaining({ id: first.signalId, payload: 0 }),
+    ]);
+    expect(await node.store.signals({ name: 'value', key: 'false', afterId: 0, upToId: Number.MAX_SAFE_INTEGER })).toEqual([]);
+    expect(await node.client.getStatus('l-1')).toMatchObject({ status: 'suspended', waits: [{ signal: 'value', key: 'false' }] });
+  });
+
+  it('rejects an empty id before writing anything', async () => {
+    const node = await start([]);
+    await expect(node.client.signal('value', 1, { id: '' })).rejects.toThrow(
+      new TypeError('Invalid signal id "". Use a non-empty string, such as the id of the event that causes it.'),
+    );
+    expect(await node.store.signals({ name: 'value', key: null, afterId: 0, upToId: Number.MAX_SAFE_INTEGER })).toEqual([]);
+  });
+
+  it('derives the id inside a step: a retried step stores its signals once, and several with one name and key apart', async () => {
+    const node = await start([Notify]);
+    await node.client.start(Notify, undefined, { id: 'n-1' });
+    await node.worker.drain();
+    // The first attempt sent its signals, then failed.
+    expect(await node.client.getStatus('n-1', { journal: true })).toMatchObject({ journal: [{ name: 'notify', status: 'pending', attempts: 1 }] });
+
+    clock.advance('1s');
+    await node.worker.drain();
+    expect(await node.client.getStatus('n-1')).toMatchObject({ status: 'completed' });
+
+    const read = (name: string, key: string | null) => node.store.signals({ name, key, afterId: 0, upToId: Number.MAX_SAFE_INTEGER });
+    expect((await read('ping', 'k')).map((s) => s.payload)).toEqual(['one: attempt 1', 'two: attempt 1']);
+    expect((await read('ping', 'j')).map((s) => s.payload)).toEqual(['three: attempt 1']);
+    expect((await read('pong', null)).map((s) => s.payload)).toEqual(['explicit: attempt 1']);
+    expect(Notify.results).toEqual([
+      [true, true, true, true],
+      [false, false, false, false],
+    ]);
+
+    // Outside a step, the same call stores another signal.
+    await node.client.signal('ping', 'from a controller', { key: 'k' });
+    expect(await read('ping', 'k')).toHaveLength(3);
   });
 
   it('rejects an empty signal name before writing anything', async () => {

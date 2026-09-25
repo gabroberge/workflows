@@ -13,6 +13,7 @@ import type {
   WorkflowListQuery,
   WorkflowSignalQuery,
   WorkflowSignalRecord,
+  WorkflowSignalResult,
   WorkflowStore,
   WorkflowWrite,
 } from '../interfaces/workflow-store.interface.js';
@@ -47,7 +48,7 @@ const CANCELLABLE = new Set(['pending', 'running', 'suspended']);
 export class InMemoryWorkflowStore implements WorkflowStore {
   private static readonly logger = new Logger('WorkflowsModule');
   private readonly rows = new Map<string, Row>();
-  private readonly signalLog: WorkflowSignalRecord[] = [];
+  private readonly signalLog: Array<WorkflowSignalRecord & { dedupeId: string | null }> = [];
   private warnedAboutTransactions = false;
 
   /** `create()`, at once: it can't join `transaction` (see the class). */
@@ -57,7 +58,7 @@ export class InMemoryWorkflowStore implements WorkflowStore {
   }
 
   /** `signal()`, at once: it can't join `transaction` (see the class). */
-  async signalInTransaction(transaction: unknown, s: NewWorkflowSignal): Promise<{ id: number; woken: number }> {
+  async signalInTransaction(transaction: unknown, s: NewWorkflowSignal): Promise<WorkflowSignalResult> {
     this.cannotJoin('signalInTransaction');
     return this.signal(s);
   }
@@ -147,9 +148,14 @@ export class InMemoryWorkflowStore implements WorkflowStore {
     return true;
   }
 
-  async signal(s: NewWorkflowSignal): Promise<{ id: number; woken: number }> {
+  async signal(s: NewWorkflowSignal): Promise<WorkflowSignalResult> {
+    const earlier = s.dedupeId === null ? undefined : this.signalLog.find((r) => r.name === s.name && r.dedupeId === s.dedupeId);
+    if (earlier) {
+      return { id: earlier.id, woken: 0, created: false, key: earlier.key };
+    }
+
     const id = this.lastSignalId() + 1;
-    this.signalLog.push({ id, name: s.name, key: s.key, payload: copy(s.payload), createdAt: s.now });
+    this.signalLog.push({ id, name: s.name, key: s.key, dedupeId: s.dedupeId, payload: copy(s.payload), createdAt: s.now });
 
     let woken = 0;
     for (const { instance, waits } of this.rows.values()) {
@@ -165,13 +171,13 @@ export class InMemoryWorkflowStore implements WorkflowStore {
       woken++;
     }
 
-    return { id, woken };
+    return { id, woken, created: true, key: s.key };
   }
 
   async signals(query: WorkflowSignalQuery): Promise<WorkflowSignalRecord[]> {
     return this.signalLog
       .filter((s) => s.name === query.name && s.key === query.key && s.id > query.afterId && s.id <= query.upToId)
-      .map(copy);
+      .map(({ dedupeId: _dedupeId, ...record }) => copy(record));
   }
 
   async claim(request: WorkflowClaimRequest): Promise<WorkflowClaim> {

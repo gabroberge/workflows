@@ -77,8 +77,10 @@ export const workflowSignals = pgTable(
     id: bigint('id', { mode: 'number' }).primaryKey().generatedAlwaysAsIdentity(),
     name: text('name').notNull(),
     key: text('key'),
+    /** The sender's id for the signal: stored once per name. */
+    dedupeId: text('dedupe_id'),
     payload: jsonb('payload'),
     createdAt: bigint('created_at', { mode: 'number' }).notNull(),
   },
-  (t) => [index('workflow_signals_lookup').on(t.name, t.key, t.id)],
+  (t) => [index('workflow_signals_lookup').on(t.name, t.key, t.id), unique('workflow_signals_dedupe').on(t.name, t.dedupeId)],
 );

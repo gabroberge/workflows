@@ -98,8 +98,8 @@ export function workflowStoreContract(
   });
 
   add('create() starts the signal cursor at the last signal sent before the instance', async (t) => {
-    await t.store.signal({ name: 's', key: null, payload: 1, now: 0 });
-    const { id } = await t.store.signal({ name: 's', key: null, payload: 2, now: 0 });
+    await t.store.signal({ name: 's', key: null, dedupeId: null, payload: 1, now: 0 });
+    const { id } = await t.store.signal({ name: 's', key: null, dedupeId: null, payload: 2, now: 0 });
     equal((await t.create('a')).instance.signalCursor, id, 'signalCursor');
     equal((await t.claim(0)).lastSignalId, id, 'claim().lastSignalId');
   });
@@ -257,19 +257,19 @@ export function workflowStoreContract(
       await t.store.write(id, 't', { now: 2, entries: [], status: 'suspended', release: { wakeAt: null, waits: [{ signal: 'shipment.delivered', key: keys[id]! }], signalCursor: 0 } });
     }
 
-    const s1 = await t.store.signal({ name: 'shipment.delivered', key: 'k2', payload: 'x', now: 3 });
+    const s1 = await t.store.signal({ name: 'shipment.delivered', key: 'k2', dedupeId: null, payload: 'x', now: 3 });
     equal(s1.woken, 0, 'another key');
-    const s2 = await t.store.signal({ name: 'other', key: null, payload: 'x', now: 3 });
+    const s2 = await t.store.signal({ name: 'other', key: null, dedupeId: null, payload: 'x', now: 3 });
     equal(s2.woken, 0, 'another name');
-    const s3 = await t.store.signal({ name: 'shipment.delivered', key: '', payload: { e: '' }, now: 4 });
+    const s3 = await t.store.signal({ name: 'shipment.delivered', key: '', dedupeId: null, payload: { e: '' }, now: 4 });
     equal(s3.woken, 1, "the '' key");
     expect(await t.store.get('empty'), { wakeAt: 4, updatedAt: 4 }, "woken: the '' wait");
     expect(await t.store.get('none'), { wakeAt: null }, 'not woken: the wait without a key');
 
-    const s4 = await t.store.signal({ name: 'shipment.delivered', key: null, payload: null, now: 5 });
+    const s4 = await t.store.signal({ name: 'shipment.delivered', key: null, dedupeId: null, payload: null, now: 5 });
     equal(s4.woken, 1, 'no key');
-    const s5 = await t.store.signal({ name: 'shipment.delivered', key: 'k1', payload: [1], now: 6 });
-    const s6 = await t.store.signal({ name: 'shipment.delivered', key: 'k1', payload: [2], now: 7 });
+    const s5 = await t.store.signal({ name: 'shipment.delivered', key: 'k1', dedupeId: null, payload: [1], now: 6 });
+    const s6 = await t.store.signal({ name: 'shipment.delivered', key: 'k1', dedupeId: null, payload: [2], now: 7 });
     equal([s5.woken, s6.woken], [1, 0], 'an instance already due is not woken again');
 
     const ids = [s1, s2, s3, s4, s5, s6].map((s) => s.id);
@@ -290,7 +290,7 @@ export function workflowStoreContract(
     await t.create('a');
     await t.create('b');
     const { lastSignalId: cursor } = await t.claim(1, { token: 't' });
-    await t.store.signal({ name: 'go', key: 'a', payload: 1, now: 2 }); // while a and b were executing
+    await t.store.signal({ name: 'go', key: 'a', dedupeId: null, payload: 1, now: 2 }); // while a and b were executing
 
     const suspend = (id: string) =>
       t.store.write(id, 't', { now: 3, entries: [], status: 'suspended', release: { wakeAt: FAR, waits: [{ signal: 'go', key: id }], signalCursor: cursor } });
@@ -303,6 +303,36 @@ export function workflowStoreContract(
     equal(c?.id, 'a', 'a is claimable');
     await t.store.write('a', 't2', { now: 4, entries: [], status: 'suspended', release: { wakeAt: FAR, waits: [{ signal: 'go', key: 'a' }], signalCursor: (await t.claim(0)).lastSignalId } });
     expect(await t.store.get('a'), { wakeAt: FAR }, 'a signal at or below the cursor was seen: parked');
+  });
+
+  add('signal() with a dedupeId stores the signal once per name, and a repeat writes and wakes nothing', async (t) => {
+    await t.create('a');
+    await t.claim(1, { token: 't' });
+    const waits = [{ signal: 'payment.captured', key: 'o1' }];
+    await t.store.write('a', 't', { now: 1, entries: [], status: 'suspended', release: { wakeAt: FAR, waits, signalCursor: 0 } });
+
+    const send = (name: string, key: string | null, dedupeId: string | null, payload: unknown, now: number) =>
+      t.store.signal({ name, key, dedupeId, payload, now });
+    const first = await send('payment.captured', 'o1', 'ch_1', { amount: 2499 }, 2);
+    expect(first, { created: true, woken: 1, key: 'o1' }, 'the first signal');
+
+    // Parked again on the same wait, having seen the first signal.
+    await t.claim(2, { token: 't2' });
+    await t.store.write('a', 't2', { now: 3, entries: [], status: 'suspended', release: { wakeAt: FAR, waits, signalCursor: first.id } });
+    equal(await send('payment.captured', 'o1', 'ch_1', { amount: 1 }, 4), { id: first.id, woken: 0, created: false, key: 'o1' }, 'a repeat');
+    expect(await t.store.get('a'), { status: 'suspended', wakeAt: FAR, updatedAt: 3 }, 'not woken by the repeat');
+    equal(await send('payment.captured', 'o2', 'ch_1', 'x', 5), { id: first.id, woken: 0, created: false, key: 'o1' }, 'the same id with another key');
+
+    const otherName = await send('refund.issued', 'o1', 'ch_1', 'y', 6);
+    expect(otherName, { created: true, key: 'o1' }, 'the same id under another name');
+    const plain = [await send('payment.captured', 'o1', null, 'p', 7), await send('payment.captured', 'o1', null, 'p', 8)];
+    expect(plain, [{ created: true }, { created: true }], 'signals without a dedupeId');
+    equal(new Set([first.id, otherName.id, ...plain.map((s) => s.id)]).size, 4, 'distinct ids');
+
+    const read = (name: string, key: string) => t.store.signals({ name, key, afterId: 0, upToId: Number.MAX_SAFE_INTEGER });
+    equal((await read('payment.captured', 'o1')).map((s) => s.payload), [{ amount: 2499 }, 'p', 'p'], 'the first payload, stored once');
+    equal(await read('payment.captured', 'o2'), [], 'nothing under the other key');
+    equal((await t.claim(0)).lastSignalId, plain[1]!.id, 'the last signal id');
   });
 
   // ---------------------------------------------------------------- cancel
@@ -359,7 +389,7 @@ export function workflowStoreContract(
       await rejects(
         transaction(async (tx) => {
           expect(await createInTransaction(tx, { id: 'rolled-back', workflow: 'order-fulfilment', version: 1, input: 1, now: 1 }), { created: true }, 'created in the transaction');
-          await signalInTransaction(tx, { name: 'go', key: 'x', payload: 1, now: 1 });
+          await signalInTransaction(tx, { name: 'go', key: 'x', dedupeId: null, payload: 1, now: 1 });
           throw new Error('payment declined');
         }),
         'payment declined',
@@ -373,7 +403,7 @@ export function workflowStoreContract(
       const results = await transaction(async (tx) => [
         await createInTransaction(tx, { id: 'committed', workflow: 'order-fulfilment', version: 1, input: { a: 1 }, now: 2 }),
         await createInTransaction(tx, { id: 'committed', workflow: 'order-fulfilment', version: 1, input: { a: 2 }, now: 3 }),
-        await signalInTransaction(tx, { name: 'go', key: 'w', payload: 'p', now: 4 }),
+        await signalInTransaction(tx, { name: 'go', key: 'w', dedupeId: null, payload: 'p', now: 4 }),
       ] as const);
 
       expect(results[0], { created: true, instance: { id: 'committed', status: 'pending', input: { a: 1 }, signalCursor: 0 } }, 'created');
@@ -382,6 +412,30 @@ export function workflowStoreContract(
       expect(await t.store.get('committed'), { status: 'pending', wakeAt: 2 }, 'committed');
       expect(await t.store.get('waiting'), { wakeAt: 4 }, 'woken with the commit');
       expect(await t.store.signals({ name: 'go', key: 'w', afterId: 0, upToId: results[2].id }), [{ id: results[2].id, payload: 'p' }], 'the signal');
+    });
+  }
+
+  if (transaction) {
+    add('signalInTransaction() stores a dedupeId once per commit, and a rolled-back signal leaves its id free', async (t) => {
+      const { signalInTransaction } = requireTransactionMethods(t.store);
+      const data = (payload: unknown, now: number) => ({ name: 'payment.captured', key: 'o1', dedupeId: 'ch_1', payload, now });
+      await rejects(
+        transaction(async (tx) => {
+          expect(await signalInTransaction(tx, data('rolled back', 1)), { created: true }, 'stored in the transaction');
+          throw new Error('payment declined');
+        }),
+        'payment declined',
+      );
+
+      const [first, again] = await transaction(async (tx) => [await signalInTransaction(tx, data('committed', 2)), await signalInTransaction(tx, data('again', 3))] as const);
+      expect(first, { created: true }, 'the id is free after the rollback');
+      equal(again, { id: first.id, woken: 0, created: false, key: 'o1' }, 'a repeat in the same transaction');
+      expect(await t.store.signal(data('outside', 4)), { id: first.id, created: false }, 'a repeat after the commit');
+      equal(
+        (await t.store.signals({ name: 'payment.captured', key: 'o1', afterId: 0, upToId: Number.MAX_SAFE_INTEGER })).map((s) => s.payload),
+        ['committed'],
+        'one signal',
+      );
     });
   }
 
@@ -444,7 +498,7 @@ export function workflowStoreContract(
 
           const signal = async () => {
             await jitter();
-            const data = { name: 'go', key: instance.id, payload: i, now: 6 };
+            const data = { name: 'go', key: instance.id, dedupeId: null, payload: i, now: 6 };
             if (i % 2 === 0 || !transaction || !t.store.signalInTransaction) {
               return t.store.signal(data);
             }
@@ -480,10 +534,10 @@ export function workflowStoreContract(
       const send = async (i: number) => {
         await jitter();
         if (i % 3 !== 0 || !transaction || !t.store.signalInTransaction) {
-          return t.store.signal({ name: 's', key: null, payload: i, now: 1 });
+          return t.store.signal({ name: 's', key: null, dedupeId: null, payload: i, now: 1 });
         }
         return transaction(async (tx) => {
-          const result = await t.store.signalInTransaction!(tx, { name: 's', key: null, payload: i, now: 1 });
+          const result = await t.store.signalInTransaction!(tx, { name: 's', key: null, dedupeId: null, payload: i, now: 1 });
           await jitter();
           return result;
         });
@@ -499,6 +553,28 @@ export function workflowStoreContract(
       for (const { cursor, seen } of probes) {
         equal(all.filter((id) => id <= cursor), seen, `the signals at or below cursor ${cursor}`);
       }
+    });
+
+    add('concurrent signals with one dedupeId store it once, and every call returns its id', async (t) => {
+      const send = async (i: number) => {
+        await jitter();
+        const data = { name: 'payment.captured', key: 'o1', dedupeId: 'ch_1', payload: i, now: i };
+        if (i % 2 === 0 || !transaction || !t.store.signalInTransaction) {
+          return t.store.signal(data);
+        }
+
+        return transaction(async (tx) => {
+          const result = await t.store.signalInTransaction!(tx, data);
+          await jitter();
+          return result;
+        });
+      };
+
+      const results = await Promise.all(Array.from({ length: 12 }, (_, i) => send(i)));
+      equal(results.filter((r) => r.created).length, 1, 'created once');
+      equal(new Set(results.map((r) => r.id)).size, 1, 'one id for every call');
+      const stored = await t.store.signals({ name: 'payment.captured', key: 'o1', afterId: 0, upToId: Number.MAX_SAFE_INTEGER });
+      equal(stored.map((s) => s.id), [results[0]!.id], 'one signal stored');
     });
 
     add('a cancel racing a suspension leaves the instance due', async (t) => {

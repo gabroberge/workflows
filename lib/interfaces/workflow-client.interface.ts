@@ -27,11 +27,31 @@ export interface SignalWorkflowOptions {
   /** Correlation key: only waits with the same key take the signal. */
   key?: string;
   /**
+   * Deduplication id, unique per signal name, such as the id of the message or event that
+   * causes the signal. A signal with the same name and id stored earlier makes this call a
+   * no-op that returns that signal's `signalId` with `created: false`: a sender that runs
+   * again (a redelivered message, a retried job) stores its signal once, and the first payload
+   * wins. The same name and id with a different key throws `WorkflowIdConflictError`.
+   * Inside a workflow step, a signal sent without an id gets one derived from the step's
+   * `idempotencyKey`, so a retried step doesn't send it again.
+   */
+  id?: string;
+  /**
    * Your ORM's transaction, as for `start()`: the signal, and the wake-up of the instances
    * waiting for it, commit with your writes. Signals queue behind it until it ends, so keep
    * it short. On PostgreSQL it must be READ COMMITTED (the default).
    */
   transaction?: unknown;
+}
+
+/** What `signal()` returns. */
+export interface WorkflowSignalSendResult {
+  /** The stored signal's id: the new one, or with `created: false` the one stored earlier with the same `id`. */
+  signalId: number;
+  /** Instances parked on a matching wait that this call woke. */
+  woken: number;
+  /** `false` if a signal with the same name and `id` was stored earlier: nothing was written. */
+  created: boolean;
 }
 
 /** What `start()` returns: safe to send to a client (no input, no lease details). */

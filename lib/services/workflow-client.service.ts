@@ -9,6 +9,7 @@ import type { WorkflowInput } from '../interfaces/workflow-runner.interface.js';
 import { normalize } from './workflow-execution.service.js';
 import { signalName, type WorkflowSignal } from '../signals/workflow.signal.js';
 import { WorkflowStorage } from '../storage/workflow.storage.js';
+import { stepSignalId } from '../utils/step-scope.util.js';
 import type { WorkflowInstanceDetails, WorkflowStore } from '../interfaces/workflow-store.interface.js';
 import { WorkflowRegistry } from './workflow-registry.service.js';
 import { WorkflowWorker } from './workflow-worker.service.js';
@@ -20,6 +21,7 @@ import type {
   WorkflowStartResult,
   WorkflowCancelResult,
   WorkflowListFilter,
+  WorkflowSignalSendResult,
 } from '../interfaces/workflow-client.interface.js';
 
 /** Starts, signals, inspects and cancels workflow instances. Works with or without a local worker. */
@@ -147,23 +149,37 @@ export class WorkflowClient {
    * `ctx.waitForSignal()` later still gets a signal sent after it started, and
    * each signal is consumed at most once per instance. `woken` counts only the
    * instances parked on a matching wait right now. With `transaction`, the
-   * signal and the wake-ups commit or roll back with your transaction.
+   * signal and the wake-ups commit or roll back with your transaction. With
+   * `id`, or from inside a workflow step, a repeated signal is stored once.
    */
   async signal<T>(
     signal: WorkflowSignal<T> | string,
     payload: NoInfer<T>,
     options: SignalWorkflowOptions = {},
-  ): Promise<{ signalId: number; woken: number }> {
-    const data = { name: signalName(signal), key: options.key ?? null, payload: normalize(payload), now: this.clock.now() };
+  ): Promise<WorkflowSignalSendResult> {
+    const name = signalName(signal);
+    const key = options.key ?? null;
+    if (options.id !== undefined && (typeof options.id !== 'string' || options.id.length === 0)) {
+      throw new TypeError(`Invalid signal id ${JSON.stringify(options.id)}. Use a non-empty string, such as the id of the event that causes it.`);
+    }
+
+    const dedupeId = options.id ?? stepSignalId(name, key) ?? null;
+    const data = { name, key, dedupeId, payload: normalize(payload), now: this.clock.now() };
+    // Nothing is awaited before the store's call, as in start().
     const result = await (options.transaction === undefined
       ? this.store.signal(data)
       : this.storeMethod('signalInTransaction', 'signal')(options.transaction, data));
 
+    if (!result.created && result.key !== key) {
+      throw new WorkflowIdConflictError(
+        `Signal id "${dedupeId}" of "${name}" was already used with ${describeKey(result.key)}, not ${describeKey(key)}.`,
+      );
+    }
     if (result.woken > 0) {
       this.worker.kick();
     }
 
-    return { signalId: result.id, woken: result.woken };
+    return { signalId: result.id, woken: result.woken, created: result.created };
   }
 
   /** The store's method for joining the application's transaction, bound; throws if it has none. */
@@ -188,4 +204,8 @@ export function canonical(value: unknown): string {
       ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
       : v,
   ) ?? 'undefined';
+}
+
+function describeKey(key: string | null): string {
+  return key === null ? 'no key' : `key "${key}"`;
 }

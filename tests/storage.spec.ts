@@ -249,7 +249,7 @@ describe('the in-memory default and transactions', () => {
     await moduleRef.close();
 
     // Once per store: another one warns again, here from signalInTransaction().
-    await new InMemoryWorkflowStore().signalInTransaction(tx, { name: 'go', key: null, payload: 1, now: 1 });
+    await new InMemoryWorkflowStore().signalInTransaction(tx, { name: 'go', key: null, dedupeId: null, payload: 1, now: 1 });
     expect(warnings[1]).toMatch(/^InMemoryWorkflowStore\.signalInTransaction\(\) received your transaction handle/);
   });
 });

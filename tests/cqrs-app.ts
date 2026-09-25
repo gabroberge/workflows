@@ -90,6 +90,8 @@ export class ReserveStockHandler implements ICommandHandler<ReserveStockCommand>
 @SignalOn(PaymentCapturedEvent, {
   signal: paymentCaptured,
   key: (event) => event.orderId,
+  // A redelivered payment event stores no second signal.
+  id: (event) => event.chargeId,
   payload: (event) => ({ chargeId: event.chargeId, amount: event.amount }),
 })
 export class OrderFulfilmentWorkflow {

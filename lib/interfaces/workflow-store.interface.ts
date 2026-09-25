@@ -66,8 +66,14 @@ export interface WorkflowStore {
    * an exclusive lock before choosing the id and hold it until commit (the `write()` side takes
    * it shared). That gives the two guarantees the engine relies on: signal ids become visible
    * in id order, and a signal and a suspension of the same instance never interleave.
+   *
+   * With a `dedupeId`, a signal stored earlier with the same name and `dedupeId` makes the call
+   * a no-op: write and wake nothing, and return that signal's id and key with `created: false`.
+   * Enforce it with a unique constraint on `(name, dedupeId)` and insert-or-ignore, never a read
+   * followed by a write, and never by catching the duplicate-key error (in the application's
+   * transaction, on PostgreSQL, that aborts it). Signals without a `dedupeId` never conflict.
    */
-  signal(signal: NewWorkflowSignal): Promise<{ id: number; woken: number }>;
+  signal(signal: NewWorkflowSignal): Promise<WorkflowSignalResult>;
   /**
    * Optional: `signal()` through the application's transaction, for
    * `signal(signal, payload, { transaction })`, under the same rules as `createInTransaction()`.
@@ -75,7 +81,7 @@ export interface WorkflowStore {
    * transaction must be READ COMMITTED, or the wake-up can miss waits committed after its
    * snapshot: refuse other isolation levels.
    */
-  signalInTransaction?(transaction: unknown, signal: NewWorkflowSignal): Promise<{ id: number; woken: number }>;
+  signalInTransaction?(transaction: unknown, signal: NewWorkflowSignal): Promise<WorkflowSignalResult>;
   /** Signals named `name` with exactly `key` and `afterId < id <= upToId`, by id. */
   signals(query: WorkflowSignalQuery): Promise<WorkflowSignalRecord[]>;
 
@@ -143,8 +149,25 @@ export interface NewWorkflowSignal {
   name: string;
   /** Correlation key; `null` for a signal sent without one. Matches waits with exactly this key. */
   key: string | null;
+  /**
+   * The sender's id for this signal (`WorkflowClient.signal()`'s `id` option), unique per signal
+   * name: a signal with the same name and `dedupeId` is stored once. `null`: never deduplicated.
+   */
+  dedupeId: string | null;
   payload: unknown;
   now: number;
+}
+
+/** What `WorkflowStore.signal()` and `signalInTransaction()` return. */
+export interface WorkflowSignalResult {
+  /** The stored signal's id: the new one, or with `created: false` the one stored earlier. */
+  id: number;
+  /** Instances made due; `0` with `created: false`. */
+  woken: number;
+  /** `false` when a signal with the same name and `dedupeId` was stored earlier. */
+  created: boolean;
+  /** The stored signal's key: the given one, or with `created: false` the earlier signal's. */
+  key: string | null;
 }
 
 export interface WorkflowSignalQuery {

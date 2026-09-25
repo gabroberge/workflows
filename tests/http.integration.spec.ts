@@ -85,8 +85,8 @@ describe.each(adapters)('order fulfilment over HTTP ($name)', ({ name: adapter }
 
       const other = await node.http('POST', '/webhooks/carrier', { orderId: 'o2', trackingId: 'TRK-2' });
       const delivered = await node.http('POST', '/webhooks/carrier', { orderId: 'o1', trackingId: 'TRK-1' });
-      expect(other).toEqual({ status: 200, body: { signalId: 1, woken: 0 } });
-      expect(delivered).toEqual({ status: 200, body: { signalId: 2, woken: 1 } });
+      expect(other).toEqual({ status: 200, body: { signalId: 1, woken: 0, created: true } });
+      expect(delivered).toEqual({ status: 200, body: { signalId: 2, woken: 1, created: true } });
 
       await node.worker.drain();
       expect((await node.http('GET', '/orders/o1/fulfilment')).body).toEqual({ status: 'suspended', waits: [], error: null });
@@ -132,6 +132,7 @@ describe.each(adapters)('order fulfilment over HTTP ($name)', ({ name: adapter }
     expect((await node.http('POST', '/webhooks/carrier', { orderId: 'o1', trackingId: 'TRK-1' })).body).toEqual({
       signalId: 1,
       woken: 0,
+      created: true,
     });
     await node.worker.drain();
     clock.advance('7d');
@@ -165,7 +166,7 @@ describe.each(adapters)('order fulfilment over HTTP ($name)', ({ name: adapter }
     ]);
 
     const late = await node.http('POST', '/webhooks/carrier', { orderId: 'o1', trackingId: 'TRK-1' });
-    expect(late.body).toEqual({ signalId: 1, woken: 0 });
+    expect(late.body).toEqual({ signalId: 1, woken: 0, created: true });
     expect(await node.worker.drain()).toBe(0);
     expect((await node.http('GET', '/orders/o1/fulfilment')).body.status).toBe('failed');
   });

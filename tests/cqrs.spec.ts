@@ -171,6 +171,9 @@ describe('startup checks', () => {
       new TypeError('@StartOn() takes the event class first, got string.'),
     );
     expect(() => SignalOn(PaymentCapturedEvent, { signal: '' as string, payload: (event) => event })).toThrow(TypeError);
+    expect(() => SignalOn(PaymentCapturedEvent, { signal: paymentCaptured, id: 'chargeId' as never, payload: (event) => event })).toThrow(
+      new TypeError('@SignalOn(PaymentCapturedEvent): `id` must be a function of the event, such as (event) => event.orderId, or left out.'),
+    );
     expect(() => SignalOn(PaymentCapturedEvent, { signal: paymentCaptured, key: 'orderId' as never, payload: (event) => event })).toThrow(
       new TypeError(
         '@SignalOn(PaymentCapturedEvent): `key` must be a function of the event, such as (event) => event.orderId, or left out.',
@@ -226,6 +229,7 @@ describe('the publisher', () => {
     @SignalOn(PaymentCapturedEvent, {
       signal: paymentCaptured,
       key: (event) => event.orderId,
+      id: (event) => event.chargeId,
       payload: (event) => ({ chargeId: event.chargeId, amount: event.amount }),
     })
     class OrderFulfilmentWorkflowV2 extends OrderFulfilmentWorkflow {}
@@ -243,15 +247,19 @@ describe('the publisher', () => {
 
     await app.eventBus.publish(new PaymentCapturedEvent('o-1', 'ch_1', 2499));
     expect(await signalsSent(app.store, 'payment.captured', 'o-1')).toHaveLength(1);
+    // Redelivered: the charge id is the signal's id, so nothing new is stored.
+    await app.eventBus.publish(new PaymentCapturedEvent('o-1', 'ch_1', 2499));
+    expect(await signalsSent(app.store, 'payment.captured', 'o-1')).toHaveLength(1);
     await app.worker.drain();
     expect(await app.client.getStatus(fulfilmentId('o-1'))).toMatchObject({ version: 1, status: 'completed' });
   });
 
-  it('sends a signal two workflows map once, and rejects publish() when they disagree on its payload', async () => {
+  it('sends a signal two workflows map once, and rejects publish() when they disagree on its payload or id', async () => {
     @Workflow('receipt')
     @SignalOn(PaymentCapturedEvent, {
       signal: paymentCaptured,
       key: (event) => event.orderId,
+      id: (event) => event.chargeId,
       payload: (event) => ({ amount: event.amount, chargeId: event.chargeId }),
     })
     class ReceiptWorkflow {
@@ -266,6 +274,16 @@ describe('the publisher', () => {
       async run() {}
     }
 
+    @Workflow('ledger')
+    @SignalOn(PaymentCapturedEvent, {
+      signal: paymentCaptured,
+      key: (event) => event.orderId,
+      payload: (event) => ({ chargeId: event.chargeId, amount: event.amount }),
+    })
+    class LedgerWorkflow {
+      async run() {}
+    }
+
     const agreeing = await boot({ workflows: [OrderFulfilmentWorkflow, ReceiptWorkflow], providers: shared() });
     await agreeing.eventBus.publish(new PaymentCapturedEvent('o-1', 'ch_1', 2499));
     expect(await signalsSent(agreeing.store, 'payment.captured', 'o-1')).toMatchObject([{ payload: { chargeId: 'ch_1', amount: 2499 } }]);
@@ -276,9 +294,19 @@ describe('the publisher', () => {
         '@SignalOn() on order-fulfilment and on invoice.',
     );
     expect(await signalsSent(disagreeing.store, 'payment.captured', 'o-1')).toEqual([]);
+
+    // Without an id, a redelivery would store a second signal for the instances the other declaration dedupes for.
+    const noId = await boot({ workflows: [OrderFulfilmentWorkflow, LedgerWorkflow], providers: shared() });
+    await expect(noId.eventBus.publish(new PaymentCapturedEvent('o-1', 'ch_1', 2499))).rejects.toThrow(
+      'PaymentCapturedEvent maps to two different ids for the signal "payment.captured" (key "o-1"): ' +
+        '@SignalOn() on order-fulfilment and on ledger.',
+    );
+    expect(await signalsSent(noId.store, 'payment.captured', 'o-1')).toEqual([]);
   });
 
-  it('rejects publish() and writes nothing when a mapping throws or returns a key that is not a string', async () => {
+  it('rejects publish() and writes nothing when a mapping throws, returns a key that is not a string, or an empty id', async () => {
+    class ParcelLabelledEvent {}
+
     @Workflow('packing')
     @StartOn(OrderPlacedEvent, { id: (event) => `packing-${event.orderId}` })
     @StartOn(OrderReadyEvent, {
@@ -287,6 +315,7 @@ describe('the publisher', () => {
       },
     })
     @SignalOn(PaymentCapturedEvent, { signal: 'packing.paid', key: (event) => event.amount as unknown as string })
+    @SignalOn(ParcelLabelledEvent, { signal: 'packing.labelled', id: () => '' })
     class PackingWorkflow {
       async run() {}
     }
@@ -298,8 +327,12 @@ describe('the publisher', () => {
     await expect(app.eventBus.publish(new PaymentCapturedEvent('o-1', 'ch_1', 2499))).rejects.toThrow(
       '@SignalOn(PaymentCapturedEvent) on packing: `key` returned number, not a string.',
     );
+    await expect(app.eventBus.publish(new ParcelLabelledEvent())).rejects.toThrow(
+      '@SignalOn(ParcelLabelledEvent) on packing: `id` returned an empty string. Derive it from the event, such as event.deliveryId.',
+    );
     expect(await app.client.list()).toEqual([]);
     expect(await signalsSent(app.store, 'packing.paid', null)).toEqual([]);
+    expect(await signalsSent(app.store, 'packing.labelled', null)).toEqual([]);
   });
 
   it('starts the workflow from an aggregate’s commit(), and reports its failures on the UnhandledExceptionBus', async () => {
@@ -335,6 +368,7 @@ describe('the publisher', () => {
     await waitFor(() => unhandled.length === 1);
     expect(unhandled[0].cause).toBeInstanceOf(OrderPlacedEvent);
     expect(unhandled[0].exception).toBeInstanceOf(WorkflowIdConflictError);
+
   });
 
   it('reads the transaction from a plain dispatcher context, and from nothing else', async () => {

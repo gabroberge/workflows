@@ -19,6 +19,7 @@ describe.runIf(storeKind === 'memory')('workflowStoreContract()', () => {
 
     expect(withTransaction.filter((name) => !base.includes(name))).toEqual([
       "createInTransaction() and signalInTransaction() commit and roll back with the application's transaction",
+      'signalInTransaction() stores a dedupeId once per commit, and a rolled-back signal leaves its id free',
     ]);
     const added = concurrent.filter((name) => !base.includes(name));
     expect(added).toEqual(expect.arrayContaining(['concurrent claims never return the same instance twice', 'concurrent create() and requestCancel() of one id: one wins']));

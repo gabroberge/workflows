@@ -152,7 +152,7 @@ describe.each(adapters)('pods on one database ($name)', ({ name: adapter }) => {
 
     clock.advance('31s');
     await waitFor(async () => (await statusOf(second, 'b1')).status === 'suspended');
-    expect((await second.http('POST', '/webhooks/approvals', { batchId: 'b1', by: 'ops' })).body).toEqual({ signalId: 1, woken: 1 });
+    expect((await second.http('POST', '/webhooks/approvals', { batchId: 'b1', by: 'ops' })).body).toEqual({ signalId: 1, woken: 1, created: true });
     await waitFor(async () => (await statusOf(second, 'b1')).status === 'completed');
 
     expect(await statusOf(second, 'b1')).toMatchObject({ runs: 3, leaseOwner: 'pod-b' });
@@ -217,7 +217,7 @@ describe.each(adapters)('pods on one database ($name)', ({ name: adapter }) => {
     expect(await api.worker.drain()).toBe(0); // it has nothing it could claim
 
     await waitFor(async () => (await statusOf(api, 'b1')).status === 'suspended');
-    expect((await api.http('POST', '/webhooks/approvals', { batchId: 'b1', by: 'api' })).body).toEqual({ signalId: 1, woken: 1 });
+    expect((await api.http('POST', '/webhooks/approvals', { batchId: 'b1', by: 'api' })).body).toEqual({ signalId: 1, woken: 1, created: true });
     await waitFor(async () => (await statusOf(api, 'b1')).status === 'completed'); // the worker pod's next poll
 
     expect(await statusOf(api, 'b1')).toMatchObject({ runs: 2, leaseOwner: 'worker-1' });

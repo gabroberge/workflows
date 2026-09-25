@@ -11,6 +11,7 @@ import {
   type WorkflowListQuery,
   type WorkflowSignalQuery,
   type WorkflowSignalRecord,
+  type WorkflowSignalResult,
   type WorkflowStore,
   type WorkflowWrite,
 } from '../../../lib/index.js';
@@ -55,13 +56,17 @@ export class DrizzleWorkflowStore implements WorkflowStore {
 
   async get(id: string, options: { journal?: boolean } = {}): Promise<WorkflowInstanceDetails | null> {
     const [instance] = await this.db.select().from(instances).where(eq(instances.id, id));
-    if (!instance) return null;
+    if (!instance) {
+      return null;
+    }
     const waiting = await this.db
       .select({ signal: waits.signal, key: waits.key })
       .from(waits)
       .where(eq(waits.instanceId, id))
       .orderBy(asc(waits.position));
-    if (!options.journal) return { ...toInstance(instance), waits: waiting };
+    if (!options.journal) {
+      return { ...toInstance(instance), waits: waiting };
+    }
     const entries = await this.db.select({ entry: journal.entry }).from(journal).where(eq(journal.instanceId, id)).orderBy(asc(journal.seq));
     return { ...toInstance(instance), waits: waiting, journal: entries.map((row) => row.entry) };
   }
@@ -109,7 +114,7 @@ export class DrizzleWorkflowStore implements WorkflowStore {
 
   async signals(query: WorkflowSignalQuery): Promise<WorkflowSignalRecord[]> {
     return this.db
-      .select()
+      .select({ id: signals.id, name: signals.name, key: signals.key, payload: signals.payload, createdAt: signals.createdAt })
       .from(signals)
       .where(and(eq(signals.name, query.name), keyIs(signals.key, query.key), gt(signals.id, query.afterId), lte(signals.id, query.upToId)))
       .orderBy(asc(signals.id));
@@ -164,14 +169,18 @@ export class DrizzleWorkflowStore implements WorkflowStore {
   write(id: string, token: string, write: WorkflowWrite): Promise<boolean> {
     return this.db.transaction(async (tx) => {
       const release = write.release;
-      if (release && release.waits.length > 0) await tx.execute(sql`SELECT pg_advisory_xact_lock_shared(${signalLock})`);
+      if (release && release.waits.length > 0) {
+        await tx.execute(sql`SELECT pg_advisory_xact_lock_shared(${signalLock})`);
+      }
       // The fence: only the lease holder writes, and the row stays locked until commit.
       const [fenced] = await tx
         .select({ cancelRequested: instances.cancelRequested })
         .from(instances)
         .where(and(eq(instances.id, id), eq(instances.leaseToken, token)))
         .for('update');
-      if (!fenced) return false;
+      if (!fenced) {
+        return false;
+      }
 
       if (write.entries.length > 0) {
         await tx
@@ -226,13 +235,30 @@ export class DrizzleWorkflowStore implements WorkflowStore {
       })
       .onConflictDoNothing()
       .returning();
-    if (created) return { instance: toInstance(created), created: true };
+    if (created) {
+      return { instance: toInstance(created), created: true };
+    }
     const [existing] = await db.select().from(instances).where(eq(instances.id, i.id));
     return { instance: toInstance(existing!), created: false };
   }
 
-  private async insertSignal(tx: Transaction, s: NewWorkflowSignal) {
+  private async insertSignal(tx: Transaction, s: NewWorkflowSignal): Promise<WorkflowSignalResult> {
     await tx.execute(sql`SELECT pg_advisory_xact_lock(${signalLock})`);
+    // A name and dedupe id stored before make this a no-op: the unique constraint decides,
+    // with nothing to catch, because an error would abort the app's transaction.
+    const [signal] = await tx
+      .insert(signals)
+      .values({ name: s.name, key: s.key, dedupeId: s.dedupeId, payload: s.payload, createdAt: s.now })
+      .onConflictDoNothing({ target: [signals.name, signals.dedupeId] })
+      .returning({ id: signals.id });
+    if (!signal) {
+      const [earlier] = await tx
+        .select({ id: signals.id, key: signals.key })
+        .from(signals)
+        .where(and(eq(signals.name, s.name), eq(signals.dedupeId, s.dedupeId!)));
+      return { id: earlier!.id, woken: 0, created: false, key: earlier!.key };
+    }
+
     const waiting = tx
       .select({ id: waits.instanceId })
       .from(waits)
@@ -248,11 +274,7 @@ export class DrizzleWorkflowStore implements WorkflowStore {
         ),
       )
       .returning({ id: instances.id });
-    const [signal] = await tx
-      .insert(signals)
-      .values({ name: s.name, key: s.key, payload: s.payload, createdAt: s.now })
-      .returning({ id: signals.id });
-    return { id: signal!.id, woken: woken.length };
+    return { id: signal.id, woken: woken.length, created: true, key: s.key };
   }
 
   private async lastSignalId(db: Database) {

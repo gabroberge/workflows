@@ -150,24 +150,21 @@ export class WorkflowEventPublisher implements IEventPublisher, OnModuleInit, On
 
       // A signal reaches every instance waiting with its name and key, whatever the workflow:
       // two declarations that agree are one signal, and two that disagree are a mistake.
-      const sent = new Map<string, { payload: string; name: string }>();
+      const sent = new Map<string, { payload: string; id: string | undefined; name: string }>();
       for (const { name, route } of targets.signals) {
         const key = route.key ? route.key(event) : undefined;
-        if (key !== undefined && typeof key !== 'string') {
-          throw new TypeError(
-            `@SignalOn(${event.constructor.name}) on ${name}: \`key\` returned ${typeof key}, not a string. ` +
-              'Waits match keys exactly, so convert it (String(event.orderId)) on both sides.',
-          );
-        }
+        assertString(event, name, 'key', key, 'Waits match keys exactly, so convert it (String(event.orderId)) on both sides.');
+        const id = route.id ? route.id(event) : undefined;
+        assertString(event, name, 'id', id, 'Derive it from the event, such as event.deliveryId.');
 
         const payload = route.payload ? route.payload(event) : event;
         const identity = JSON.stringify([route.signal, key ?? null]);
         const json = canonical(normalize(payload) ?? null);
         const earlier = sent.get(identity);
         if (earlier) {
-          if (earlier.payload !== json) {
+          if (earlier.payload !== json || earlier.id !== id) {
             throw new Error(
-              `${event.constructor.name} maps to two different payloads for the signal "${route.signal}"` +
+              `${event.constructor.name} maps to two different ${earlier.payload !== json ? 'payloads' : 'ids'} for the signal "${route.signal}"` +
                 `${key === undefined ? '' : ` (key "${key}")`}: @SignalOn() on ${earlier.name} and on ${name}. ` +
                 'A signal reaches every instance waiting for it: make the declarations agree, or keep one.',
             );
@@ -175,8 +172,8 @@ export class WorkflowEventPublisher implements IEventPublisher, OnModuleInit, On
           continue;
         }
 
-        sent.set(identity, { payload: json, name });
-        writes.push({ event, run: (transaction) => this.workflowClient.signal(route.signal, payload, { key, transaction }) });
+        sent.set(identity, { payload: json, id, name });
+        writes.push({ event, run: (transaction) => this.workflowClient.signal(route.signal, payload, { key, id, transaction }) });
       }
     }
 
@@ -206,6 +203,15 @@ export class WorkflowEventPublisher implements IEventPublisher, OnModuleInit, On
   /** Built at `onModuleInit`, or at the first publish if another module's hook publishes earlier. */
   private table(): Map<Function, WorkflowEventTargets> {
     return (this.routes ??= this.explorer.explore());
+  }
+}
+
+/** A key may be empty (it matches waits for ''), an id may not (WorkflowClient.signal() refuses it). */
+function assertString(event: object, workflow: string, option: 'key' | 'id', value: unknown, advice: string): void {
+  if (value !== undefined && (typeof value !== 'string' || (option === 'id' && value.length === 0))) {
+    throw new TypeError(
+      `@SignalOn(${event.constructor.name}) on ${workflow}: \`${option}\` returned ${value === '' ? 'an empty string' : `${typeof value}, not a string`}. ${advice}`,
+    );
   }
 }
 

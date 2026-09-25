@@ -46,7 +46,7 @@ if (storeKind === 'memory') {
 // The suite itself, once: it needs no database.
 if (storeKind === 'memory') {
   describe('the contract suite', () => {
-    it('fails a store that loses a wake-up, and one that skips the fence', async () => {
+    it('fails a store that loses a wake-up, one that skips the fence, and one that ignores dedupe ids', async () => {
       /** Registers waits without looking for signals that arrived after the execution's cursor. */
       class NoMissedSignalCheck extends InMemoryWorkflowStore {
         override async write(...[id, token, write]: Parameters<InMemoryWorkflowStore['write']>) {
@@ -62,6 +62,13 @@ if (storeKind === 'memory') {
         }
       }
 
+      /** Stores every signal, dedupe id or not. */
+      class NoDedupe extends InMemoryWorkflowStore {
+        override async signal(...[signal]: Parameters<InMemoryWorkflowStore['signal']>) {
+          return super.signal({ ...signal, dedupeId: null });
+        }
+      }
+
       const failures = async (store: () => WorkflowStore) => {
         const failed: string[] = [];
         for (const c of workflowStoreContract(store, { concurrent: true })) {
@@ -73,6 +80,10 @@ if (storeKind === 'memory') {
       expect(await failures(() => new NoMissedSignalCheck())).toEqual(
         expect.arrayContaining(['write() keeps an instance due when a signal for its new waits arrived after its cursor']),
       );
+      expect(await failures(() => new NoDedupe())).toEqual([
+        'signal() with a dedupeId stores the signal once per name, and a repeat writes and wakes nothing',
+        'concurrent signals with one dedupeId store it once, and every call returns its id',
+      ]);
       expect(await failures(() => new ExpiryFence())).toEqual(
         expect.arrayContaining(['write() changes nothing under a stale token', "a stale lease holder's writes never land, however they interleave with the new holder's"]),
       );

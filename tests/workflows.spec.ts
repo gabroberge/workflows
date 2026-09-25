@@ -551,7 +551,7 @@ describe('cancel bookkeeping and shutdown', () => {
 
     // The node's connection is still open: the store still reads and writes.
     expect(await node.store.get('order-o1')).toMatchObject({ status: 'pending' });
-    expect(await node.store.signal({ name: 'x', key: null, payload: 1, now: 0 })).toMatchObject({ id: 1 });
+    expect(await node.store.signal({ name: 'x', key: null, dedupeId: null, payload: 1, now: 0 })).toMatchObject({ id: 1 });
   });
 });
 

@@ -10,8 +10,8 @@ import { CommandBus, CqrsModule, EventBus } from '@nestjs/cqrs';
 import { sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import pg from 'pg';
-import { WorkflowsCqrsModule } from '../lib/cqrs/index.js';
-import { ManualWorkflowClock, WorkflowIdConflictError } from '../lib/index.js';
+import { SignalOn, WorkflowsCqrsModule } from '../lib/cqrs/index.js';
+import { ManualWorkflowClock, Workflow, WorkflowIdConflictError, WorkflowSignal, type WorkflowContext } from '../lib/index.js';
 import {
   CapturePaymentCommand,
   cqrsProviders,
@@ -26,6 +26,42 @@ import type { Database } from './fixtures/database/drizzle.js';
 import * as schema from './fixtures/database/schema.js';
 import { orders, workflowSignals } from './fixtures/database/schema.js';
 import { boot, connect, openStore, storeKind, tempDb, waitFor, type Connection, type Node, type TestDb } from './support.js';
+
+class ParcelPackedEvent {
+  constructor(readonly orderId: string) {}
+}
+
+const parcelPacked = new WorkflowSignal<{ orderId: string }>('parcel.packed');
+
+/** Publishes `ParcelPackedEvent` from a step whose first attempt fails after publishing. */
+@Workflow('packing')
+class PackingWorkflow {
+  constructor(private readonly eventBus: EventBus) {}
+
+  async run(ctx: WorkflowContext, { orderId }: { orderId: string }) {
+    await ctx.step(
+      'pack',
+      async ({ attempt }) => {
+        await this.eventBus.publish(new ParcelPackedEvent(orderId));
+        if (attempt === 1) {
+          throw new Error('the label printer jammed');
+        }
+      },
+      { retry: { attempts: 2, backoff: { delay: '1s' } } },
+    );
+  }
+}
+
+/** Counts the parcels packed for an order, waiting up to an hour for a second one. */
+@Workflow('dispatch')
+@SignalOn(ParcelPackedEvent, { signal: parcelPacked, key: (event) => event.orderId, payload: (event) => ({ orderId: event.orderId }) })
+class DispatchWorkflow {
+  async run(ctx: WorkflowContext, { orderId }: { orderId: string }) {
+    await ctx.waitForSignal('first-parcel', parcelPacked, { key: orderId });
+    const second = await ctx.waitForSignal('second-parcel', parcelPacked, { key: orderId, timeout: '1h' });
+    return { parcels: second === null ? 1 : 2 };
+  }
+}
 
 describe('workflows started and signalled by CQRS events', () => {
   let db: TestDb;
@@ -136,6 +172,49 @@ describe('workflows started and signalled by CQRS events', () => {
     expect(await node.client.getStatus(fulfilmentId('o-1'))).toMatchObject({ status: 'completed' });
   });
 
+  it('stores a redelivered payment’s signal once: the charge id is the signal’s id', async () => {
+    const node = await start();
+    ledger.lookUpInstances = false;
+    await node.commandBus.execute(new PlaceOrderCommand('o-1', 2499));
+    await node.worker.drain();
+
+    await node.commandBus.execute(new CapturePaymentCommand('o-1', 'ch_1', 2499));
+    await node.commandBus.execute(new CapturePaymentCommand('o-1', 'ch_1', 2499));
+    const { store, close } = openStore(db);
+    try {
+      expect(await store.signals({ name: 'payment.captured', key: 'o-1', afterId: 0, upToId: Number.MAX_SAFE_INTEGER })).toHaveLength(1);
+    } finally {
+      await close();
+    }
+    await node.worker.drain();
+    expect(await node.client.getStatus(fulfilmentId('o-1'))).toMatchObject({ status: 'completed' });
+  });
+
+  it('sends a mapped signal once from a step that published its event and was retried', async () => {
+    const node = await boot({
+      db,
+      clock,
+      imports: [CqrsModule.forRoot(), WorkflowsCqrsModule],
+      workflows: [PackingWorkflow, DispatchWorkflow],
+    });
+    nodes.push(node);
+
+    await node.client.start(DispatchWorkflow, { orderId: 'o-1' }, { id: 'dispatch-o-1' });
+    await node.client.start(PackingWorkflow, { orderId: 'o-1' }, { id: 'packing-o-1' });
+    await node.worker.drain();
+    clock.advance('1s'); // the packing step's retry
+    await node.worker.drain();
+    expect(await node.client.getStatus('packing-o-1', { journal: true })).toMatchObject({
+      status: 'completed',
+      journal: [{ name: 'pack', status: 'completed', attempts: 2 }],
+    });
+
+    // Two attempts published ParcelPackedEvent; one signal was stored, so the second wait times out.
+    clock.advance('1h');
+    await node.worker.drain();
+    expect(await node.client.getStatus('dispatch-o-1')).toMatchObject({ status: 'completed', output: { parcels: 1 } });
+  });
+
   it('rejects publish() when a start fails, and hands the event to no handler', async () => {
     const node = await start();
     ledger.lookUpInstances = false;
@@ -207,6 +286,18 @@ describe('workflows started and signalled by CQRS events', () => {
       expect(await signalCount()).toBe(1);
       await node.worker.drain();
       expect(await node.client.getStatus(fulfilmentId('o-2'))).toMatchObject({ status: 'completed' });
+    });
+
+    it('stores a payment redelivered in another transaction once, and that transaction still commits', async () => {
+      const node = await start();
+      await node.commandBus.execute(new PlaceOrderCommand('o-1', 2499));
+      await node.worker.drain();
+
+      await node.commandBus.execute(new CapturePaymentCommand('o-1', 'ch_1', 2499));
+      await database.update(orders).set({ total: 0 }).where(sql`true`);
+      await node.commandBus.execute(new CapturePaymentCommand('o-1', 'ch_1', 2499));
+      expect(await database.select({ total: orders.total }).from(orders)).toEqual([{ total: 2499 }]);
+      expect(await signalCount()).toBe(1);
     });
 
     it('finds the instance when the event comes again in another transaction, which still commits', async () => {
