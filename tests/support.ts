@@ -91,7 +91,7 @@ async function postgresBackend(): Promise<SqlBackend | string> {
 
   afterAll(async () => {
     await admin.end();
-    postgres.stop();
+    await postgres.stop();
   });
 
   return {

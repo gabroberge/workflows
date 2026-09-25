@@ -15,6 +15,7 @@ export default defineConfig({
   test: {
     globals: true,
     setupFiles: ['reflect-metadata'],
+    globalSetup: ['tests/support/global-setup.ts'],
     // The engine suites and the store contract run once per store (tests/support.ts): in
     // memory, and the tutorial's DrizzleWorkflowStore (tests/fixtures/) on PGlite and on
     // PostgreSQL (SQL_TEST_PG_URL, else a throwaway cluster from local binaries, else skipped
