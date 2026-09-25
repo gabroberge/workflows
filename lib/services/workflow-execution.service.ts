@@ -909,7 +909,7 @@ export class WorkflowExecution {
     WorkflowExecution.logger.warn(
       `${this.describe()} has ${this.journal.size} journal entries (${this.journalBytes} bytes), past the warning line of ` +
         `${warnEntries} entries or ${warnBytes} bytes: every execution loads and replays all of it. Bound the loop that grows it, ` +
-        'or continue in a new instance (see https://docs.nestjs.com/reliability/workflows#journal-growth).',
+        'or continue in a new instance (see https://docs.nestjs.com/reliability/workflows#keep-journals-short).',
     );
     this.emit({ type: 'journal-large', entries: this.journal.size, bytes: this.journalBytes });
   }
@@ -940,7 +940,7 @@ export class WorkflowExecution {
       message:
         `${this.describe()} reached its journal limit before "${name}": ${this.journal.size} entries, ${this.journalBytes} bytes ` +
         `(journal.maxEntries ${maxEntries}, journal.maxBytes ${maxBytes}). Continue a long loop in a new instance instead ` +
-        '(see https://docs.nestjs.com/reliability/workflows#journal-growth).',
+        '(see https://docs.nestjs.com/reliability/workflows#keep-journals-short).',
     };
     throw this.interrupt('journal-limit');
   }

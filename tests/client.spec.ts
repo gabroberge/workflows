@@ -422,7 +422,7 @@ describe.runIf(storeKind === 'memory')('transactions on a store without the opti
     try {
       await expect(client.start(Echo, {}, { id: 'tx', transaction: {} })).rejects.toThrow(
         'start() with { transaction } needs a WorkflowStore on your database that implements createInTransaction(); ' +
-          'BareStore has none. See "Implementing a store" in the README.',
+          'BareStore has none. See https://docs.nestjs.com/reliability/workflows#the-store-contract.',
       );
       await expect(client.signal('value', 1, { transaction: {} })).rejects.toThrow(
         'signal() with { transaction } needs a WorkflowStore on your database that implements signalInTransaction(); BareStore has none.',

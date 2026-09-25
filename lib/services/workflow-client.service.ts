@@ -342,7 +342,7 @@ export class WorkflowClient {
     if (typeof fn !== 'function') {
       throw new TypeError(
         `${caller}() with { transaction } needs a WorkflowStore on your database that implements ${method}(); ` +
-          `${store.constructor.name} has none. See "Implementing a store" in the README.`,
+          `${store.constructor.name} has none. See https://docs.nestjs.com/reliability/workflows#the-store-contract.`,
       );
     }
 
