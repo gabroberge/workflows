@@ -1,16 +1,26 @@
 /**
  * An aggregate's events and `@nestjs/workflows/cqrs`, on every store: the durable path the docs
- * recommend (`publishAll(aggregate.getUncommittedEvents(), { transaction })`, then `uncommit()`),
- * committing and rolling back with the command handler's transaction on the SQL stores, and the
- * two paths it warns against: `commit()` of an aggregate merged with `EventPublisher`, and of a
- * `@Publishable()` aggregate. Both start the workflow in the background, outside the transaction.
+ * recommend with any @nestjs/cqrs version (`publishAll(aggregate.getUncommittedEvents(),
+ * { transaction })`, then `uncommit()`), committing and rolling back with the command handler's
+ * transaction on the SQL stores, and `commit()` without a dispatcher context, of an aggregate
+ * merged with `EventPublisher` and of a `@Publishable()` aggregate: both start the workflow
+ * outside the transaction, in the background unless something awaits `commit()` (12.1 or later).
+ * cqrs-commit-context.integration.spec.ts covers `commit({ transaction })`.
  */
 import { Logger } from '@nestjs/common';
 import { AggregateRoot, CqrsModule, EventBus, EventPublisher, Publishable, UnhandledExceptionBus, type UnhandledExceptionInfo } from '@nestjs/cqrs';
 import { sql } from 'drizzle-orm';
 import { WorkflowsCqrsModule } from '../lib/cqrs/index.js';
 import { ManualWorkflowClock, WorkflowIdConflictError } from '../lib/index.js';
-import { cqrsProviders, fulfilmentId, Ledger, OrderFulfilmentWorkflow, OrderPlacedEvent, PaymentCapturedEvent } from './cqrs-app.js';
+import {
+  commitTakesContext,
+  cqrsProviders,
+  fulfilmentId,
+  Ledger,
+  OrderFulfilmentWorkflow,
+  OrderPlacedEvent,
+  PaymentCapturedEvent,
+} from './cqrs-app.js';
 import type { Database } from './fixtures/database/drizzle.js';
 import { orders, workflowSignals } from './fixtures/database/schema.js';
 import { boot, connect, storeKind, tempDb, waitFor, type Connection, type Node, type TestDb } from './support.js';
@@ -30,6 +40,9 @@ class Order extends AggregateRoot {
 }
 
 const COMMIT_WARNING = "OrderPlacedEvent starts or signals workflows, and an aggregate's commit() published it";
+
+/** What `commit()` returns: nothing before @nestjs/cqrs 12.1, and from 12.1 on what the event bus returns (a promise here). */
+const committed = () => (commitTakesContext ? expect.any(Promise) : undefined);
 
 describe('aggregates’ events', () => {
   let db: TestDb;
@@ -153,7 +166,7 @@ describe('aggregates’ events', () => {
 
     const order = node.publisher.mergeObjectContext(new Order('o-1'));
     order.place(2499);
-    expect(order.commit()).toBeUndefined(); // nothing to await
+    expect(order.commit()).toEqual(committed()); // not awaited
     await waitFor(async () => (await node.client.getStatus(fulfilmentId('o-1'))) !== null);
     // commit() empties the array it hands over as soon as publishAll() returns: the events still reach the
     // in-memory reactions, after the start.
@@ -175,8 +188,8 @@ describe('aggregates’ events', () => {
     class PublishableOrder extends Order {}
 
     const node = await start();
-    // commit() calls publishAll() and drops what it returns: keep it here, handled, so the test can look at it.
-    // (In an application nothing handles it: an unhandled rejection.)
+    // Keep what commit()'s publishAll() returns, handled, so the test can look at it: commit() drops it before
+    // @nestjs/cqrs 12.1, and returns it from 12.1 on. (In an application nothing handles it: an unhandled rejection.)
     const returned: unknown[] = [];
     const publishAll = node.eventBus.publishAll.bind(node.eventBus);
     vi.spyOn(node.eventBus, 'publishAll').mockImplementation((...args: Parameters<EventBus['publishAll']>) => {
@@ -188,7 +201,7 @@ describe('aggregates’ events', () => {
 
     const order = new PublishableOrder('o-1');
     order.place(2499);
-    expect(order.commit()).toBeUndefined();
+    expect(order.commit()).toEqual(committed());
     await waitFor(async () => (await node.client.getStatus(fulfilmentId('o-1'))) !== null);
     await waitFor(() => ledger.saga.length === 1);
     expect(ledger.handled).toEqual([{ event: 'OrderPlacedEvent', orderId: 'o-1' }]);

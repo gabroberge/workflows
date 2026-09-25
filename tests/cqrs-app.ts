@@ -6,10 +6,12 @@
  */
 import { Inject, Injectable, Optional } from '@nestjs/common';
 import {
+  AggregateRoot,
   Command,
   CommandBus,
   CommandHandler,
   EventBus,
+  EventPublisher,
   EventsHandler,
   ofType,
   Saga,
@@ -48,6 +50,25 @@ export class OrderReadyEvent {
 export const paymentCaptured = new WorkflowSignal<{ chargeId: string; amount: number }>('payment.captured');
 
 export const fulfilmentId = (orderId: string) => `order-${orderId}`;
+
+/** An aggregate's `commit()`, typed so that it takes a dispatcher context with every supported @nestjs/cqrs. */
+export type CommitWithContext = { commit(dispatcherContext?: unknown): unknown };
+
+/**
+ * Whether the installed @nestjs/cqrs passes a dispatcher context through an aggregate's
+ * `commit(context)` to the event bus, and returns what the bus returns (12.1 and later): tried on
+ * an aggregate merged with a stub bus that returns the context it receives, since the version
+ * number alone says nothing about a local build.
+ */
+export const commitTakesContext = (() => {
+  const context = { transaction: 'probe' };
+  const bus = {
+    publish: (_event: IEvent, received?: unknown) => received,
+    publishAll: (_events: IEvent[], received?: unknown) => received,
+  } as unknown as EventBus;
+  const aggregate: CommitWithContext = new EventPublisher(bus).mergeObjectContext(new (class extends AggregateRoot {})());
+  return aggregate.commit(context) === context;
+})();
 
 /** What the handlers, the saga and the command's side effect did. Shared by every "process" of a test. */
 export class Ledger {
