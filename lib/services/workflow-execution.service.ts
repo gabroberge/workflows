@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { Logger } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { setImmediate as nextMacrotask } from 'node:timers/promises';
 import type { WorkflowClock } from '../interfaces/workflow-clock.interface.js';
@@ -32,6 +33,8 @@ import type {
 } from '../interfaces/workflow-instance.interface.js';
 import type { WorkflowRetryOptions } from '../interfaces/workflow-retry-options.interface.js';
 import { resolveRetry, retryDelay, type ResolvedRetry } from '../utils/retry.util.js';
+import { entryBytes } from '../utils/journal-limits.util.js';
+import type { WorkflowJournalLimits } from '../interfaces/workflows-module-options.interface.js';
 import type { WorkflowEvents } from '../events/workflow-events.service.js';
 import type { WorkflowEvent } from '../events/workflow-events.interface.js';
 import { signalName, type WorkflowSignal } from '../signals/workflow.signal.js';
@@ -78,6 +81,7 @@ export interface ExecutionDeps {
   events: WorkflowEvents;
   defaultRetry: ResolvedRetry;
   leaseMs: number;
+  journalLimits: Required<WorkflowJournalLimits>;
 }
 
 /** A step's compensation, reserved when the step is called and armed when it completes. */
@@ -131,6 +135,8 @@ export class WorkflowExecution {
 
   suspension: { wakeAt: number | null; waits: WorkflowWait[] } | null = null;
   fatal: Error | null = null;
+  /** Why the journal limit stopped the run, once it did. */
+  journalLimitError: SerializedWorkflowError | null = null;
   leaseLost = false;
   storeError: unknown = null;
   shuttingDown = false;
@@ -154,6 +160,12 @@ export class WorkflowExecution {
   private stoppedBy: WorkflowInterrupt | null = null;
   /** The step whose function is running, in that function's async context. */
   private readonly insideStep = new AsyncLocalStorage<string>();
+  /** Each journal entry's size in bytes, by name, and their sum. */
+  private readonly entrySizes = new Map<string, number>();
+  private journalBytes = 0;
+  /** Whether the journal is past the warning line: it warns once, when it crosses it. */
+  private journalLarge: boolean;
+  private static readonly logger = new Logger('Workflows');
 
   constructor(
     readonly instance: ClaimedWorkflowInstance,
@@ -165,6 +177,11 @@ export class WorkflowExecution {
   ) {
     this.mode = replayOnly ? 'replay' : 'run';
     this.journal = new Map(journal.map((entry) => [entry.name, entry]));
+    for (const entry of journal) {
+      this.measure(entry);
+    }
+    // Crossed in an earlier execution, which warned then.
+    this.journalLarge = this.pastWarning();
 
     for (const entry of journal) {
       const signalId = (entry.result as { signalId?: unknown } | undefined)?.signalId;
@@ -769,6 +786,9 @@ export class WorkflowExecution {
     this.visited.add(name);
 
     const entry = this.journal.get(name);
+    if (!entry && this.mode === 'run') {
+      this.assertJournalRoom(name);
+    }
     if (entry && entry.kind !== kind) {
       throw this.setFatal(
         new WorkflowNonDeterminismError(
@@ -872,8 +892,57 @@ export class WorkflowExecution {
   }
 
   private stage(entry: WorkflowJournalEntry): void {
-    this.journal.set(entry.name, entry);
+    this.record(entry);
     this.buffer.push(entry);
+  }
+
+  /** Keeps `entry` as the journal's entry of its name, and tracks the journal's size. */
+  private record(entry: WorkflowJournalEntry): void {
+    this.journal.set(entry.name, entry);
+    this.measure(entry);
+    if (this.journalLarge || !this.pastWarning()) {
+      return;
+    }
+
+    this.journalLarge = true;
+    const { warnEntries, warnBytes } = this.deps.journalLimits;
+    WorkflowExecution.logger.warn(
+      `${this.describe()} has ${this.journal.size} journal entries (${this.journalBytes} bytes), past the warning line of ` +
+        `${warnEntries} entries or ${warnBytes} bytes: every execution loads and replays all of it. Bound the loop that grows it, ` +
+        'or continue in a new instance (see https://docs.nestjs.com/reliability/workflows#journal-growth).',
+    );
+    this.emit({ type: 'journal-large', entries: this.journal.size, bytes: this.journalBytes });
+  }
+
+  private measure(entry: WorkflowJournalEntry): void {
+    const bytes = entryBytes(entry);
+    this.journalBytes += bytes - (this.entrySizes.get(entry.name) ?? 0);
+    this.entrySizes.set(entry.name, bytes);
+  }
+
+  private pastWarning(): boolean {
+    const { warnEntries, warnBytes } = this.deps.journalLimits;
+    return this.journal.size >= warnEntries || this.journalBytes >= warnBytes;
+  }
+
+  /**
+   * Before a new name is journaled in run mode: a journal at its limit stops the run, which then
+   * compensates (compensations may still record their entries) and fails.
+   */
+  private assertJournalRoom(name: string): void {
+    const { maxEntries, maxBytes } = this.deps.journalLimits;
+    if (this.journal.size < maxEntries && this.journalBytes < maxBytes) {
+      return;
+    }
+
+    this.journalLimitError ??= {
+      name: 'WorkflowJournalLimitError',
+      message:
+        `${this.describe()} reached its journal limit before "${name}": ${this.journal.size} entries, ${this.journalBytes} bytes ` +
+        `(journal.maxEntries ${maxEntries}, journal.maxBytes ${maxBytes}). Continue a long loop in a new instance instead ` +
+        '(see https://docs.nestjs.com/reliability/workflows#journal-growth).',
+    };
+    throw this.interrupt('journal-limit');
   }
 
   /** Fenced write of staged entries plus `entries`. */
@@ -883,7 +952,7 @@ export class WorkflowExecution {
     }
 
     for (const entry of entries) {
-      this.journal.set(entry.name, entry);
+      this.record(entry);
     }
 
     const now = this.deps.clock.now();

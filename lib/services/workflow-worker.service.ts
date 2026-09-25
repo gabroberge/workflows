@@ -16,6 +16,7 @@ import { isWorkflowInterrupt } from '../errors/workflow-interrupt.error.js';
 import { serializeError } from '../utils/serialize-error.util.js';
 import type { SerializedWorkflowError } from '../interfaces/serialized-workflow-error.interface.js';
 import { DEFAULT_RETRY, resolveRetry } from '../utils/retry.util.js';
+import { resolveJournalLimits } from '../utils/journal-limits.util.js';
 import {
   normalize,
   uniqueEntries,
@@ -110,6 +111,7 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
       events,
       leaseMs,
       defaultRetry: resolveRetry(options.retry, DEFAULT_RETRY),
+      journalLimits: resolveJournalLimits(options.journal),
     };
   }
 
@@ -336,6 +338,9 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
     }
     if (!outcome.ok && isWorkflowInterrupt(outcome.error) && outcome.error.reason === 'timeout') {
       return this.compensate(exec, instance, timedOut(instance), false);
+    }
+    if (exec.journalLimitError) {
+      return this.compensate(exec, instance, exec.journalLimitError, false);
     }
 
     if (exec.suspension) {

@@ -7,6 +7,8 @@ export type InterruptReason =
   | 'cancel'
   /** The instance's run timeout passed. */
   | 'timeout'
+  /** The instance's journal reached the module's `journal.maxEntries` or `journal.maxBytes`. */
+  | 'journal-limit'
   /** Another worker took over the instance; nothing this run does is recorded. */
   | 'lease-lost'
   /** The application is shutting down; the instance is handed back. */

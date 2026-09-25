@@ -24,12 +24,35 @@ export interface WorkflowWorkerOptions {
   shutdownTimeout?: Duration;
 }
 
+/**
+ * How large an instance's journal may grow. Every execution loads the whole journal and replays
+ * `run()` from the top, so a journal that keeps growing (a loop with a step or sleep per round)
+ * makes every execution slower. Counts are journal entries (steps, sleeps, waits, commits,
+ * `now()`/`random()`/`uuid()` values and compensations), bytes their size as JSON. `Infinity`
+ * turns a check off.
+ */
+export interface WorkflowJournalLimits {
+  /** Log a warning, and emit `journal-large`, once, when an instance's journal grows past this many entries. Default 1,000. */
+  warnEntries?: number;
+  /** The same, past this many bytes. Default 1,000,000 (1 MB). */
+  warnBytes?: number;
+  /**
+   * Fail the instance before it records a new entry past this many: it compensates and ends as
+   * `failed` with a `WorkflowJournalLimitError`. Compensations may still record theirs. Default 10,000.
+   */
+  maxEntries?: number;
+  /** The same, past this many bytes. Default 10,000,000 (10 MB). */
+  maxBytes?: number;
+}
+
 /** What `forRoot()` takes, and what `forRootAsync()`'s factory returns. */
 export interface WorkflowsModuleOptions {
   /** Default: the system clock. Pass a `ManualWorkflowClock` in tests. */
   clock?: WorkflowClock;
   /** `false` is shorthand for `{ enabled: false }`. */
   worker?: WorkflowWorkerOptions | false;
+  /** How large a journal may grow before a warning, and before the instance fails. */
+  journal?: WorkflowJournalLimits;
   /** Default step retry: 3 attempts, 1s doubling up to 5m, no jitter. */
   retry?: number | false | WorkflowRetryOptions;
   /**

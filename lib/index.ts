@@ -4,6 +4,7 @@ export { WORKFLOWS_MODULE_OPTIONS } from './workflows.module-definition.js';
 export type {
   WorkflowsModuleAsyncOptions,
   WorkflowsModuleOptions,
+  WorkflowJournalLimits,
   WorkflowsOptionsFactory,
   WorkflowWorkerOptions,
 } from './interfaces/index.js';
@@ -64,6 +65,7 @@ export {
   type WorkflowCompletedEvent,
   type WorkflowEvent,
   type WorkflowFailedEvent,
+  type WorkflowJournalLargeEvent,
   type WorkflowResumedEvent,
   type WorkflowSignalReceivedEvent,
   type WorkflowSignalTimedOutEvent,

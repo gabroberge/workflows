@@ -102,6 +102,16 @@ export interface WorkflowSignalTimedOutEvent extends WorkflowEventBase {
   signal: string;
 }
 
+/**
+ * Channel `nestjs:workflows:journal-large`: the instance's journal grew past the module's
+ * `journal.warnEntries` or `journal.warnBytes`. Emitted once, when it crosses the line.
+ */
+export interface WorkflowJournalLargeEvent extends WorkflowEventBase {
+  type: 'journal-large';
+  entries: number;
+  bytes: number;
+}
+
 export type WorkflowEvent =
   | WorkflowStartedEvent
   | WorkflowResumedEvent
@@ -115,4 +125,5 @@ export type WorkflowEvent =
   | WorkflowStepFailedEvent
   | WorkflowStepCompensatedEvent
   | WorkflowSignalReceivedEvent
-  | WorkflowSignalTimedOutEvent;
+  | WorkflowSignalTimedOutEvent
+  | WorkflowJournalLargeEvent;

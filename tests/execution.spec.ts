@@ -10,6 +10,7 @@ import {
   NonRetryableStepError,
   StepFailedError,
   Workflow,
+  WorkflowClient,
   WorkflowError,
   type WorkflowContext,
 } from '../lib/index.js';
@@ -817,5 +818,100 @@ describe('run timeouts', () => {
       new TypeError('Invalid timeout "-1m" for start(). Use a positive duration, such as "30d".'),
     );
     expect(await node.client.list()).toEqual([]);
+  });
+});
+
+describe('journal growth', () => {
+  /** A reminder loop: a step and a sleep per round, so every round adds two entries. */
+  @Workflow('reminders')
+  class Reminders {
+    constructor(@Inject(World) private readonly world: World) {}
+
+    async run(ctx: WorkflowContext, input: { rounds: number; note?: string }) {
+      await ctx.step('hold', () => this.world.record('hold', ''), { compensate: () => this.world.record('unhold', '') });
+      for (let i = 1; i <= input.rounds; i++) {
+        await ctx.step(`remind-${i}`, () => input.note ?? `round ${i}`);
+        await ctx.sleep(`wait-${i}`, '1d');
+      }
+      return input.rounds;
+    }
+  }
+
+  const runDays = async (node: Node, days: number) => {
+    for (let day = 0; day <= days; day++) {
+      await node.worker.drain();
+      clock.advance('1d');
+    }
+  };
+
+  it('warns once, when the journal crosses the line, however many executions load it after', async () => {
+    const node = await start([Reminders], { journal: { warnEntries: 6 } });
+    await node.client.start(Reminders, { rounds: 5 }, { id: 'r-1' });
+    await runDays(node, 6);
+
+    expect(await node.client.getStatus('r-1')).toMatchObject({ status: 'completed', output: 5 });
+    const large = node.events.filter((e) => e.type === 'journal-large');
+    expect(large).toEqual([expect.objectContaining({ id: 'r-1', entries: 6, bytes: expect.any(Number) })]);
+  });
+
+  it('fails the instance before it records an entry past maxEntries, and still compensates', async () => {
+    const node = await start([Reminders], { journal: { maxEntries: 6 } });
+    await node.client.start(Reminders, { rounds: 5 }, { id: 'r-1' });
+    await runDays(node, 6);
+
+    const status = await node.client.getStatus('r-1', { journal: true });
+    expect(status).toMatchObject({ status: 'failed', error: { name: 'WorkflowJournalLimitError' } });
+    expect(status!.error!.message).toMatch(/^Instance "r-1" of workflow "reminders@1" reached its journal limit before "wait-3": 6 entries, \d+ bytes \(journal.maxEntries 6, journal.maxBytes 10000000\)/);
+    expect(status!.journal.map((e) => e.name)).toEqual(['hold', 'remind-1', 'wait-1', 'remind-2', 'wait-2', 'remind-3', '$compensate:hold']);
+    expect(world.ops()).toEqual(['hold', 'unhold']);
+  });
+
+  it('fails on bytes too: a large result is kept, and the next new entry stops the run', async () => {
+    const node = await start([Reminders], { journal: { maxBytes: 5_000 } });
+    await node.client.start(Reminders, { rounds: 3, note: 'x'.repeat(6_000) }, { id: 'r-1' });
+    await runDays(node, 4);
+
+    expect(await node.client.getStatus('r-1', { journal: true })).toMatchObject({
+      status: 'failed',
+      error: { name: 'WorkflowJournalLimitError' },
+      journal: [{ name: 'hold' }, { name: 'remind-1', status: 'completed' }, { name: '$compensate:hold', status: 'completed' }],
+    });
+  });
+
+  it('continues a long loop in a new instance, started from the last step of each generation', async () => {
+    @Workflow('daily-digest')
+    class DailyDigest {
+      constructor(
+        @Inject(World) private readonly world: World,
+        @Inject(WorkflowClient) private readonly workflowClient: WorkflowClient,
+      ) {}
+
+      async run(ctx: WorkflowContext, input: { subscriber: string; generation: number }) {
+        for (let day = 1; day <= 3; day++) {
+          await ctx.step(`send-${day}`, ({ idempotencyKey }) => this.world.record('digest', idempotencyKey));
+          await ctx.sleep(`wait-${day}`, '1d');
+        }
+        // The next generation starts with a fresh journal; a retried step gets it back instead of a second one.
+        const next = { subscriber: input.subscriber, generation: input.generation + 1 };
+        return ctx.step('continue', () =>
+          this.workflowClient.start(DailyDigest, next, { id: `digest-${input.subscriber}-${next.generation}` }).then(({ id }) => id),
+        );
+      }
+    }
+
+    const node = await start([DailyDigest], { journal: { maxEntries: 8 } });
+    await node.client.start(DailyDigest, { subscriber: 'u42', generation: 1 }, { id: 'digest-u42-1' });
+    await runDays(node, 7);
+
+    expect(await node.client.getStatus('digest-u42-1')).toMatchObject({ status: 'completed', output: 'digest-u42-2' });
+    expect(await node.client.getStatus('digest-u42-2')).toMatchObject({ status: 'completed', output: 'digest-u42-3' });
+    expect(await node.client.getStatus('digest-u42-3')).toMatchObject({ status: 'suspended' });
+    expect(world.count('digest')).toBe(8); // 3 + 3 + 2 so far
+  });
+
+  it('rejects a limit that is not a positive number at startup', async () => {
+    await expect(start([Reminders], { journal: { maxEntries: 0 } })).rejects.toThrow(
+      new TypeError('journal.maxEntries (0) must be a positive number, or Infinity to turn the check off.'),
+    );
   });
 });

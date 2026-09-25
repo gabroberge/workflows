@@ -22,6 +22,7 @@ import {
   WorkflowWorker,
   type WorkflowClock,
   type WorkflowEvent,
+  type WorkflowJournalLimits,
   type WorkflowRetryOptions,
   type WorkflowStore,
   type WorkflowWorkerOptions,
@@ -276,6 +277,7 @@ export async function boot(options: {
   clock?: WorkflowClock;
   worker?: WorkflowWorkerOptions;
   retry?: number | false | WorkflowRetryOptions;
+  journal?: WorkflowJournalLimits;
 }): Promise<Node> {
   const connection = connect(options.db);
   const drizzle = connection.db instanceof InMemoryWorkflowStore ? null : connection.db;
@@ -284,6 +286,7 @@ export async function boot(options: {
       WorkflowsModule.forRoot({
         clock: options.clock,
         retry: options.retry,
+        journal: options.journal,
         worker: { enabled: false, shutdownTimeout: 50, ...options.worker },
       }),
       ...(options.imports ?? []),
