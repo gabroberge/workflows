@@ -446,6 +446,72 @@ export function workflowStoreContract(
     expect(await t.store.get('a'), { status: 'compensating', wakeAt: 500 }, 'compensating: its own wakeAt');
   });
 
+  // ---------------------------------------------------------------- operator actions
+
+  add('reopen() applies once, only while the instance is unleased and as the engine read it', async (t) => {
+    await t.create('a', 0);
+    await t.claim(1, { token: 't' });
+    const failure = { name: 'StepFailedError', message: 'no' };
+    await t.store.write('a', 't', { now: 2, entries: [entry('charge', { status: 'failed', attempts: 3, error: failure })], status: 'failed', error: failure, release: { wakeAt: null, waits: [], signalCursor: 0 } });
+
+    const reopen = (expect: { status: 'failed' | 'completed'; runs: number }, now: number) =>
+      t.store.reopen('a', {
+        expect,
+        status: 'pending',
+        error: null,
+        deadline: 9_000,
+        entries: [entry('charge', { status: 'pending', attempts: 0, wakeAt: null, error: failure }), entry('$retry:1', { kind: 'retry', attempts: 0, data: { from: 'failed' } })],
+        now,
+      });
+    equal(await reopen({ status: 'completed', runs: 1 }, 3), false, 'another status');
+    equal(await reopen({ status: 'failed', runs: 2 }, 3), false, 'another runs count');
+    expect(await t.store.get('a', { journal: true }), { status: 'failed', error: failure, updatedAt: 2, deadline: null, journal: [{ name: 'charge', status: 'failed' }] }, 'unchanged');
+
+    equal(await reopen({ status: 'failed', runs: 1 }, 5), true, 'as read');
+    expect(await t.store.get('a', { journal: true }), {
+      status: 'pending',
+      error: null,
+      wakeAt: 5,
+      updatedAt: 5,
+      deadline: 9_000,
+      journal: [{ name: 'charge', status: 'pending', attempts: 0 }, { name: '$retry:1', kind: 'retry', data: { from: 'failed' } }],
+    }, 'reopened');
+    equal(await reopen({ status: 'failed', runs: 1 }, 6), false, 'a second retry of the same read');
+
+    const [claimed] = (await t.claim(5, { token: 't2' })).instances;
+    expect(claimed, { id: 'a', status: 'running', runs: 2 }, 'claimable');
+    await t.store.write('a', 't2', { now: 7, entries: [], status: 'compensation_failed', error: failure });
+    equal(await t.store.reopen('a', { expect: { status: 'compensation_failed', runs: 2 }, status: 'compensating', error: failure, entries: [], now: 8 }), false, 'leased');
+    await t.store.write('a', 't2', { now: 9, entries: [], release: { wakeAt: null, waits: [], signalCursor: 0 } });
+    equal(await t.store.reopen('a', { expect: { status: 'compensation_failed', runs: 2 }, status: 'compensating', error: failure, entries: [], now: 10 }), true, 'unleased');
+    expect(await t.store.get('a'), { status: 'compensating', wakeAt: 10, deadline: 9_000 }, 'the deadline, left as it was');
+  });
+
+  add('delete() removes an instance with its journal and waits, only in the given statuses', async (t) => {
+    await t.create('done');
+    await t.create('parked');
+    await t.claim(1, { token: 't' });
+    await t.store.write('done', 't', { now: 2, entries: [entry('x')], status: 'completed', error: null, release: { wakeAt: null, waits: [], signalCursor: 0 } });
+    await t.store.write('parked', 't', { now: 2, entries: [entry('w', { kind: 'signal', status: 'pending' })], status: 'suspended', release: { wakeAt: null, waits: [{ signal: 's', key: 'k' }], signalCursor: 0 } });
+
+    equal(await t.store.delete('parked', ['completed', 'failed']), false, 'another status');
+    equal(await t.store.delete('done', ['completed', 'failed']), true, 'deleted');
+    equal(await t.store.get('done'), null, 'gone');
+    equal(await t.store.delete('done', ['completed']), false, 'already gone');
+    equal(await t.store.delete('missing', ['completed']), false, 'unknown');
+
+    await t.claim(3, { token: 't2' }); // not due: nothing claimed
+    equal(await t.store.delete('parked', ['suspended']), true, 'an unfinished one, when asked');
+    equal(await t.store.list({ limit: 10, offset: 0 }), [], 'none left');
+    expect(await t.create('done'), { created: true }, 'the id, free again');
+    expect(await t.store.signal({ name: 's', key: 'k', dedupeId: null, payload: 1, now: 4 }), { woken: 0 }, "the deleted instance's waits are gone");
+
+    await t.claim(5, { token: 't3' });
+    equal(await t.store.delete('done', ['running']), true, 'a leased one');
+    equal(await t.store.write('done', 't3', t.journalWrite([entry('late')])), false, "its worker's next write");
+    equal(await t.store.renew('done', 't3', 100), null, 'and renewal');
+  });
+
   // ---------------------------------------------------------------- the application's transaction
 
   if (transaction) {
@@ -713,6 +779,38 @@ export function workflowStoreContract(
       equal(left.filter((id) => id.startsWith('p')).length, n / 2, 'every unfinished instance kept, every finished one purged');
       equal(left.filter((id) => id.startsWith('new')).length, n / 2, 'every new instance kept');
       equal((await t.store.signals({ name: 'new', key: null, afterId: 0, upToId: FAR })).length, n / 2, 'every recent signal kept');
+    });
+
+    add('concurrent reopens of one read accept one, and a purge racing them never deletes a reopened instance', async (t) => {
+      const n = 20;
+      for (let i = 0; i < n; i++) {
+        await t.create(`r${i}`);
+      }
+      await t.claim(1, { limit: n, token: 't', leaseUntil: FAR });
+      for (let i = 0; i < n; i++) {
+        await t.store.write(`r${i}`, 't', { now: 2, entries: [], status: 'failed', error: null, release: { wakeAt: null, waits: [], signalCursor: 0 } });
+      }
+
+      const reopen = (id: string) => jitter().then(() => t.store.reopen(id, { expect: { status: 'failed', runs: 1 }, status: 'pending', error: null, entries: [], now: 3 }));
+      const results = await Promise.all(
+        Array.from({ length: n }, async (_, i) => {
+          const [accepted] = await Promise.all([
+            Promise.all([reopen(`r${i}`), reopen(`r${i}`)]),
+            jitter().then(() => t.store.purge({ statuses: ['failed'], before: 100, limit: 1 })),
+          ]);
+          return accepted;
+        }),
+      );
+
+      for (const [i, [first, second]] of results.entries()) {
+        const instance = await t.store.get(`r${i}`);
+        if (first && second) {
+          throw new Error(`r${i} was reopened twice`);
+        }
+        if ((first || second) !== (instance?.status === 'pending')) {
+          throw new Error(`r${i}: reopened ${first || second}, but ${instance ? `is ${instance.status}` : 'was purged'}`);
+        }
+      }
     });
 
     add("a stale lease holder's writes never land, however they interleave with the new holder's", async (t) => {

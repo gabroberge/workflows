@@ -54,6 +54,21 @@ export interface WorkflowStore {
    * One conditional update: two concurrent requests accept one.
    */
   requestCancel(id: string, reason: string | null, now: number): Promise<boolean>;
+  /**
+   * An operator's retry of a finished instance (`WorkflowClient.retry()`), as one conditional
+   * write: if the instance holds no lease, its status is `expect.status` and its `runs` is
+   * `expect.runs` (nothing changed it since the engine read it), upsert `entries` as `write()`
+   * does, set `status`, `error` and, when given, `deadline`, make it due (`wakeAt = now`), set
+   * `updatedAt = now`, and return `true`. Otherwise change nothing and return `false`. One
+   * transaction that locks the instance row: of two concurrent retries, one is accepted.
+   */
+  reopen(id: string, reopen: WorkflowReopen): Promise<boolean>;
+  /**
+   * Deletes the instance, with its journal and waits, if its status is one of `statuses`, and
+   * returns whether it did. One statement: a worker that holds its lease finds it gone at its
+   * next write or renewal.
+   */
+  delete(id: string, statuses: WorkflowStatus[]): Promise<boolean>;
 
   // ---------------------------------------------------------------- signals
 
@@ -189,6 +204,20 @@ export interface WorkflowSignalResult {
   created: boolean;
   /** The stored signal's key: the given one, or with `created: false` the earlier signal's. */
   key: string | null;
+}
+
+/** What `WorkflowStore.reopen()` receives. */
+export interface WorkflowReopen {
+  /** What the engine read: the write applies only while the instance is still like this. */
+  expect: { status: WorkflowStatus; runs: number };
+  /** `pending` to run again, `compensating` to retry its compensations. */
+  status: 'pending' | 'compensating';
+  error: SerializedWorkflowError | null;
+  /** A new `deadline`; `undefined` leaves it as it is. */
+  deadline?: number | null;
+  /** Journal entries to upsert by name, as in `WorkflowWrite.entries`. */
+  entries: WorkflowJournalEntry[];
+  now: number;
 }
 
 /** What `WorkflowStore.purge()` receives. */

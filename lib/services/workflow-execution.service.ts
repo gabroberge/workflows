@@ -229,10 +229,10 @@ export class WorkflowExecution {
     return this.stoppedBy ? { ok: false, error: this.stoppedBy } : outcome;
   }
 
-  /** Journal entries that this execution never reached (compensations excluded). */
+  /** Journal entries that this execution never reached (compensations and retry records excluded). */
   unvisited(): string[] {
     return [...this.journal.values()]
-      .filter((entry) => entry.kind !== 'compensation' && !this.visited.has(entry.name))
+      .filter((entry) => entry.kind !== 'compensation' && entry.kind !== 'retry' && !this.visited.has(entry.name))
       .map((entry) => entry.name);
   }
 
@@ -375,7 +375,7 @@ export class WorkflowExecution {
   private async sleep(name: string, duration: Duration | { until: Date | number }): Promise<void> {
     this.assertNotInStep(`sleep("${name}")`);
     this.visit(name, 'sleep');
-    const entry = this.journal.get(name);
+    const entry = unlessCancelled(this.journal.get(name));
     if (entry?.status === 'completed') {
       return;
     }
@@ -404,7 +404,7 @@ export class WorkflowExecution {
   ): Promise<Journaled<T> | null> {
     this.assertNotInStep(`waitForSignal("${name}")`);
     this.visit(name, 'signal');
-    const entry = this.journal.get(name);
+    const entry = unlessCancelled(this.journal.get(name));
     if (entry?.status === 'completed') {
       return (entry.result as { payload: Journaled<T> | null }).payload;
     }
@@ -1028,6 +1028,14 @@ export class WorkflowExecution {
       ...body,
     } as WorkflowEvent);
   }
+}
+
+/**
+ * A sleep or wait the instance abandoned when it ended (`cancelled`) starts over when an
+ * operator retries the instance: a new deadline from now, as when it was first reached.
+ */
+function unlessCancelled(entry: WorkflowJournalEntry | undefined): WorkflowJournalEntry | undefined {
+  return entry?.status === 'cancelled' ? undefined : entry;
 }
 
 function wakeTime(name: string, when: Duration | { until: Date | number }, now: number): number {

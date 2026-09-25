@@ -8,12 +8,15 @@ import {
   type WorkflowClaimRequest,
   type WorkflowInstance,
   type WorkflowInstanceDetails,
+  type WorkflowJournalEntry,
   type WorkflowListQuery,
   type WorkflowPurgeQuery,
   type WorkflowPurgeResult,
+  type WorkflowReopen,
   type WorkflowSignalQuery,
   type WorkflowSignalRecord,
   type WorkflowSignalResult,
+  type WorkflowStatus,
   type WorkflowStore,
   type WorkflowWrite,
 } from '../../../lib/index.js';
@@ -97,6 +100,42 @@ export class DrizzleWorkflowStore implements WorkflowStore {
       .where(and(eq(instances.id, id), inArray(instances.status, CANCELLABLE), eq(instances.cancelRequested, false)))
       .returning({ id: instances.id });
     return accepted.length === 1;
+  }
+
+  /** `WorkflowClient.retry()`: one conditional update, then the journal, in one transaction. */
+  reopen(id: string, reopen: WorkflowReopen): Promise<boolean> {
+    return this.db.transaction(async (tx) => {
+      // The update locks the row; of two concurrent retries, the second finds it changed.
+      const reopened = await tx
+        .update(instances)
+        .set({ status: reopen.status, error: reopen.error, deadline: reopen.deadline, wakeAt: reopen.now, updatedAt: reopen.now })
+        .where(
+          and(
+            eq(instances.id, id),
+            isNull(instances.leaseToken),
+            eq(instances.status, reopen.expect.status),
+            eq(instances.runs, reopen.expect.runs),
+          ),
+        )
+        .returning({ id: instances.id });
+      if (reopened.length === 0) {
+        return false;
+      }
+
+      if (reopen.entries.length > 0) {
+        await this.upsertEntries(tx, id, reopen.entries);
+      }
+      return true;
+    }, READ_COMMITTED);
+  }
+
+  /** `WorkflowClient.delete()`: its journal and waits go with it (ON DELETE CASCADE). */
+  async delete(id: string, statuses: WorkflowStatus[]): Promise<boolean> {
+    const deleted = await this.db
+      .delete(instances)
+      .where(and(eq(instances.id, id), inArray(instances.status, statuses)))
+      .returning({ id: instances.id });
+    return deleted.length === 1;
   }
 
   // ---------------------------------------------------------------- signals
@@ -209,10 +248,7 @@ export class DrizzleWorkflowStore implements WorkflowStore {
       }
 
       if (write.entries.length > 0) {
-        await tx
-          .insert(journal)
-          .values(write.entries.map((entry) => ({ instanceId: id, name: entry.name, entry })))
-          .onConflictDoUpdate({ target: [journal.instanceId, journal.name], set: { entry: sql`excluded.entry` } });
+        await this.upsertEntries(tx, id, write.entries);
       }
 
       let handBack = {};
@@ -302,6 +338,14 @@ export class DrizzleWorkflowStore implements WorkflowStore {
       )
       .returning({ id: instances.id });
     return { id: signal.id, woken: woken.length, created: true, key: s.key };
+  }
+
+  /** Journal entries by name: a new name goes last (`seq`), a known one is replaced in place. */
+  private async upsertEntries(tx: Transaction, id: string, entries: WorkflowJournalEntry[]) {
+    await tx
+      .insert(journal)
+      .values(entries.map((entry) => ({ instanceId: id, name: entry.name, entry })))
+      .onConflictDoUpdate({ target: [journal.instanceId, journal.name], set: { entry: sql`excluded.entry` } });
   }
 
   private async lastSignalId(db: Database) {

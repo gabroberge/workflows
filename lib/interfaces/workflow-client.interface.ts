@@ -112,3 +112,22 @@ export interface WorkflowPurgeOptions {
   /** Instances, and signals, deleted per statement. Default 500. */
   batchSize?: number;
 }
+
+/** What `retry()` takes. */
+export interface WorkflowRetryInstanceOptions {
+  /**
+   * A new run timeout, counted from now; `false` removes it. Required to retry a `failed`
+   * instance whose deadline has passed, which would otherwise time out again at once. Default:
+   * the deadline it has.
+   */
+  timeout?: Duration | false;
+}
+
+/** What `delete()` takes. */
+export interface WorkflowDeleteOptions {
+  /**
+   * Delete an unfinished instance too, without running its compensations. A worker running it
+   * stops recording at its next write. Default `false`: only finished instances.
+   */
+  force?: boolean;
+}

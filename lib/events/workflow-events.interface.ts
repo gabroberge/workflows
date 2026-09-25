@@ -1,5 +1,5 @@
 import type { SerializedWorkflowError } from '../interfaces/serialized-workflow-error.interface.js';
-import type { WorkflowWait } from '../interfaces/workflow-instance.interface.js';
+import type { WorkflowStatus, WorkflowWait } from '../interfaces/workflow-instance.interface.js';
 
 /** Fields every lifecycle event carries. */
 export interface WorkflowEventBase {
@@ -112,6 +112,25 @@ export interface WorkflowJournalLargeEvent extends WorkflowEventBase {
   bytes: number;
 }
 
+/**
+ * Channel `nestjs:workflows:workflow-retried`: an operator's `WorkflowClient.retry()` reopened a
+ * `failed` instance (it runs again from its journal) or a `compensation_failed` one (its
+ * compensations run again).
+ */
+export interface WorkflowRetriedEvent extends WorkflowEventBase {
+  type: 'workflow-retried';
+  from: 'failed' | 'compensation_failed';
+  /** The error the instance had. */
+  error: SerializedWorkflowError | null;
+}
+
+/** Channel `nestjs:workflows:workflow-deleted`: `WorkflowClient.delete()` removed an instance. */
+export interface WorkflowDeletedEvent extends WorkflowEventBase {
+  type: 'workflow-deleted';
+  /** The status it had. */
+  status: WorkflowStatus;
+}
+
 export type WorkflowEvent =
   | WorkflowStartedEvent
   | WorkflowResumedEvent
@@ -126,4 +145,6 @@ export type WorkflowEvent =
   | WorkflowStepCompensatedEvent
   | WorkflowSignalReceivedEvent
   | WorkflowSignalTimedOutEvent
-  | WorkflowJournalLargeEvent;
+  | WorkflowJournalLargeEvent
+  | WorkflowRetriedEvent
+  | WorkflowDeletedEvent;

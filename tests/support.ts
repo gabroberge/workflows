@@ -184,6 +184,12 @@ class InMemoryAppStore implements WorkflowStore {
   requestCancel(...args: Parameters<WorkflowStore['requestCancel']>) {
     return this.db.requestCancel(...args);
   }
+  reopen(...args: Parameters<WorkflowStore['reopen']>) {
+    return this.db.reopen(...args);
+  }
+  delete(...args: Parameters<WorkflowStore['delete']>) {
+    return this.db.delete(...args);
+  }
   signal(...args: Parameters<WorkflowStore['signal']>) {
     return this.db.signal(...args);
   }

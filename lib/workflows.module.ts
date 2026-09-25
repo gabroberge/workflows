@@ -9,7 +9,7 @@ import { ConfigurableModuleClass } from './workflows.module-definition.js';
 import type { WorkflowsModuleOptions } from './interfaces/workflows-module-options.interface.js';
 
 /**
- * `WorkflowsModule.forRoot({ clock?, worker?, retry?, allowInMemoryStorage? })`, or
+ * `WorkflowsModule.forRoot({ clock?, worker?, retry?, journal?, allowInMemoryStorage? })`, or
  * `forRootAsync({ imports, inject, useFactory | useClass | useExisting })`. Global by default.
  * `@Workflow()` classes are regular providers of any module. The store is not an option: a
  * provider registers it with `WorkflowStorage.registerSource(this)`, and without one the

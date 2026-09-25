@@ -22,9 +22,15 @@ import type {
   WorkflowStartResult,
   WorkflowCancelResult,
   WorkflowListFilter,
+  WorkflowDeleteOptions,
   WorkflowPurgeOptions,
+  WorkflowRetryInstanceOptions,
   WorkflowSignalSendResult,
 } from '../interfaces/workflow-client.interface.js';
+import { WorkflowStateError } from '../errors/workflow-state.error.js';
+import { WorkflowEvents } from '../events/workflow-events.service.js';
+import type { WorkflowEvent } from '../events/workflow-events.interface.js';
+import type { SerializedWorkflowError } from '../interfaces/serialized-workflow-error.interface.js';
 
 /** Starts, signals, inspects and cancels workflow instances. Works with or without a local worker. */
 @Injectable()
@@ -36,6 +42,7 @@ export class WorkflowClient {
     @Inject(WORKFLOWS_MODULE_OPTIONS) options: WorkflowsModuleOptions,
     private readonly registry: WorkflowRegistry,
     private readonly worker: WorkflowWorker,
+    private readonly events: WorkflowEvents,
   ) {
     this.clock = options.clock ?? systemClock;
   }
@@ -191,6 +198,108 @@ export class WorkflowClient {
   }
 
   /**
+   * Retries an instance that needs a person, once its cause is fixed:
+   *
+   * - `failed`: runs again from its journal. Completed steps return their results, and each
+   *   step that gave up gets its attempts back. Refused when its compensations ran: the
+   *   completed steps were undone, and resuming would build on undone work.
+   * - `compensation_failed`: runs the compensations that didn't complete again, each with its
+   *   attempts back, and ends as `failed` or `cancelled` as it would have.
+   *
+   * Journaled under `$retry:<n>`, and emitted as `workflow-retried`. Throws
+   * `WorkflowNotFoundError` for an unknown id, and `WorkflowStateError` for any other status or
+   * when another change to the instance races it.
+   */
+  async retry(id: string, options: WorkflowRetryInstanceOptions = {}): Promise<WorkflowInstance> {
+    const details = await this.store.get(id, { journal: true });
+    if (!details) {
+      throw new WorkflowNotFoundError(`No workflow instance with id "${id}".`);
+    }
+
+    const { status, journal = [] } = details;
+    const now = this.clock.now();
+    const reset = (entry: WorkflowJournalEntry): WorkflowJournalEntry => ({ ...entry, status: 'pending', attempts: 0, wakeAt: null, updatedAt: now });
+    let entries: WorkflowJournalEntry[];
+    let error: SerializedWorkflowError | null;
+    if (status === 'failed') {
+      const undone = journal.filter((entry) => entry.kind === 'compensation' && entry.status === 'completed').map((entry) => `"${entry.name}"`);
+      if (undone.length > 0) {
+        throw new WorkflowStateError(
+          `Instance "${id}" failed and its compensations ran (${undone.join(', ')}): its completed steps were undone, so ` +
+            'resuming it would build on undone work. Start a new instance instead.',
+        );
+      }
+      entries = journal.filter((entry) => entry.kind === 'step' && entry.status === 'failed').map(reset);
+      error = null;
+    } else if (status === 'compensation_failed') {
+      entries = journal.filter((entry) => entry.kind === 'compensation' && entry.status !== 'completed').map(reset);
+      const { compensation: _compensation, ...reason } = details.error ?? { name: 'Error', message: 'Unknown failure.' };
+      error = reason;
+    } else {
+      throw new WorkflowStateError(
+        `Instance "${id}" is ${status}: only failed and compensation_failed instances can be retried.` +
+          (FINISHED.includes(status) ? '' : ' cancel() stops one that is still running.'),
+      );
+    }
+
+    let deadline: number | null | undefined;
+    if (options.timeout !== undefined) {
+      deadline = options.timeout === false ? null : now + runTimeoutMs(options.timeout, 'retry()');
+    } else if (status === 'failed' && details.deadline !== null && details.deadline <= now) {
+      throw new WorkflowStateError(
+        `Instance "${id}" is past its run timeout, so it would time out again at once. Pass { timeout } with a new one, or false for none.`,
+      );
+    }
+
+    const retries = journal.filter((entry) => entry.kind === 'retry').length;
+    entries.push({ name: `$retry:${retries + 1}`, kind: 'retry', status: 'completed', attempts: 0, data: { from: status, error: details.error ?? null }, updatedAt: now });
+    const accepted = await this.store.reopen(id, {
+      expect: { status, runs: details.runs },
+      status: status === 'failed' ? 'pending' : 'compensating',
+      error,
+      ...(deadline !== undefined ? { deadline } : {}),
+      entries,
+      now,
+    });
+    if (!accepted) {
+      throw new WorkflowStateError(`Instance "${id}" changed while it was being retried. Read it again, and retry if it still needs it.`);
+    }
+
+    this.emit(details, { type: 'workflow-retried', from: status, error: details.error ?? null });
+    this.worker.kick();
+    const { waits: _waits, journal: _journal, ...instance } = (await this.store.get(id))!;
+    return instance;
+  }
+
+  /**
+   * Deletes an instance with its journal, and emits `workflow-deleted`. Only a finished one,
+   * unless `force`: then an unfinished one too, without compensating (to remove an instance no
+   * worker can run any more, such as one of a version you no longer deploy). Throws
+   * `WorkflowNotFoundError` for an unknown id, and `WorkflowStateError` for an unfinished one
+   * without `force`.
+   */
+  async delete(id: string, options: WorkflowDeleteOptions = {}): Promise<void> {
+    const details = await this.store.get(id);
+    if (!details) {
+      throw new WorkflowNotFoundError(`No workflow instance with id "${id}".`);
+    }
+
+    const deleted = await this.store.delete(id, options.force ? ALL : FINISHED);
+    if (!deleted) {
+      const current = await this.store.get(id);
+      if (!current) {
+        throw new WorkflowNotFoundError(`No workflow instance with id "${id}".`);
+      }
+      throw new WorkflowStateError(
+        `Instance "${id}" is ${current.status}: delete() removes finished instances. cancel() it first, or pass ` +
+          '{ force: true } to delete it without running its compensations.',
+      );
+    }
+
+    this.emit(details, { type: 'workflow-deleted', status: details.status });
+  }
+
+  /**
    * Deletes finished instances older than `olderThan`, with their journals, and the signals no
    * unfinished instance can take any more, in batches until none is left. Returns how many of
    * each it deleted. Run it from a scheduled job; concurrent runs are safe, only wasteful.
@@ -222,6 +331,10 @@ export class WorkflowClient {
     }
   }
 
+  private emit(instance: WorkflowInstance, body: { type: 'workflow-retried' | 'workflow-deleted' } & Record<string, unknown>): void {
+    this.events.emit({ id: instance.id, workflow: instance.workflow, version: instance.version, at: this.clock.now(), ...body } as WorkflowEvent);
+  }
+
   /** The store's method for joining the application's transaction, bound; throws if it has none. */
   private storeMethod<M extends 'createInTransaction' | 'signalInTransaction'>(method: M, caller: string): NonNullable<WorkflowStore[M]> {
     const store = this.store;
@@ -239,6 +352,7 @@ export class WorkflowClient {
 
 const FINISHED: WorkflowStatus[] = ['completed', 'failed', 'cancelled', 'compensation_failed'];
 const DEFAULT_PURGE: WorkflowStatus[] = ['completed', 'failed', 'cancelled'];
+const ALL: WorkflowStatus[] = ['pending', 'running', 'suspended', 'compensating', ...FINISHED];
 
 /** Internal: JSON with sorted object keys, to compare inputs and payloads. */
 export function canonical(value: unknown): string {

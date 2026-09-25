@@ -2,6 +2,7 @@ import { Logger } from '@nestjs/common';
 import type {
   WorkflowInstance,
   WorkflowJournalEntry,
+  WorkflowStatus,
   WorkflowWait,
 } from '../interfaces/workflow-instance.interface.js';
 import type {
@@ -13,6 +14,7 @@ import type {
   WorkflowListQuery,
   WorkflowPurgeQuery,
   WorkflowPurgeResult,
+  WorkflowReopen,
   WorkflowSignalQuery,
   WorkflowSignalRecord,
   WorkflowSignalResult,
@@ -149,6 +151,37 @@ export class InMemoryWorkflowStore implements WorkflowStore {
       instance.wakeAt = now;
     }
 
+    return true;
+  }
+
+  async reopen(id: string, r: WorkflowReopen): Promise<boolean> {
+    const row = this.rows.get(id);
+    if (!row || row.leaseToken !== null || row.instance.status !== r.expect.status || row.instance.runs !== r.expect.runs) {
+      return false;
+    }
+
+    for (const entry of r.entries) {
+      row.journal.set(entry.name, copy(entry));
+    }
+
+    const i = row.instance;
+    i.status = r.status;
+    i.error = copy(r.error);
+    if (r.deadline !== undefined) {
+      i.deadline = r.deadline;
+    }
+    i.wakeAt = r.now;
+    i.updatedAt = r.now;
+    return true;
+  }
+
+  async delete(id: string, statuses: WorkflowStatus[]): Promise<boolean> {
+    const row = this.rows.get(id);
+    if (!row || !statuses.includes(row.instance.status)) {
+      return false;
+    }
+
+    this.rows.delete(id);
     return true;
   }
 

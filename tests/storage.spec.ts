@@ -101,7 +101,7 @@ describe('WorkflowStorage.registerSource()', () => {
     }
 
     expect(() => storage.registerSource(new HalfDone() as unknown as WorkflowStore)).toThrow(
-      "WorkflowStorage.registerSource(): HalfDone doesn't implement WorkflowStore: requestCancel(), signals(), purge(), claim(), renew(), write() are missing.",
+      "WorkflowStorage.registerSource(): HalfDone doesn't implement WorkflowStore: requestCancel(), reopen(), delete(), signals(), purge(), claim(), renew(), write() are missing.",
     );
 
     const withBadOptional = Object.assign(new InMemoryWorkflowStore(), { createInTransaction: 'yes' });

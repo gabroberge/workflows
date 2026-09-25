@@ -402,6 +402,8 @@ describe.runIf(storeKind === 'memory')('transactions on a store without the opti
     get = this.inner.get.bind(this.inner);
     list = this.inner.list.bind(this.inner);
     requestCancel = this.inner.requestCancel.bind(this.inner);
+    reopen = this.inner.reopen.bind(this.inner);
+    delete = this.inner.delete.bind(this.inner);
     signal = this.inner.signal.bind(this.inner);
     signals = this.inner.signals.bind(this.inner);
     purge = this.inner.purge.bind(this.inner);

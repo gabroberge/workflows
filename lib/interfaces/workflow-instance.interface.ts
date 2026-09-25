@@ -39,7 +39,8 @@ export interface WorkflowInstance {
 
 export interface WorkflowJournalEntry {
   name: string;
-  kind: 'step' | 'sleep' | 'signal' | 'commit' | 'now' | 'random' | 'uuid' | 'compensation';
+  /** `retry`: an operator's `WorkflowClient.retry()`, recorded under `$retry:<n>` with what it retried in `data`. */
+  kind: 'step' | 'sleep' | 'signal' | 'commit' | 'now' | 'random' | 'uuid' | 'compensation' | 'retry';
   /**
    * `cancelled`: still pending (a sleep, a wait, a retry backoff) when the
    * instance ended as `cancelled`, `failed` or `compensation_failed`.
