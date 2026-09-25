@@ -11,6 +11,8 @@ import type {
   WorkflowClaimRequest,
   WorkflowInstanceDetails,
   WorkflowListQuery,
+  WorkflowPurgeQuery,
+  WorkflowPurgeResult,
   WorkflowSignalQuery,
   WorkflowSignalRecord,
   WorkflowSignalResult,
@@ -27,6 +29,7 @@ interface Row {
 }
 
 const RUNNABLE = new Set(['pending', 'running', 'suspended', 'compensating']);
+const FINISHED = new Set(['completed', 'failed', 'cancelled', 'compensation_failed']);
 const CANCELLABLE = new Set(['pending', 'running', 'suspended']);
 
 /**
@@ -179,6 +182,31 @@ export class InMemoryWorkflowStore implements WorkflowStore {
     return this.signalLog
       .filter((s) => s.name === query.name && s.key === query.key && s.id > query.afterId && s.id <= query.upToId)
       .map(({ dedupeId: _dedupeId, ...record }) => copy(record));
+  }
+
+  async purge(query: WorkflowPurgeQuery): Promise<WorkflowPurgeResult> {
+    const finished = [...this.rows.values()]
+      .map((row) => row.instance)
+      .filter((i) => FINISHED.has(i.status) && query.statuses.includes(i.status) && i.updatedAt < query.before)
+      .sort((a, b) => a.updatedAt - b.updatedAt || compare(a.id, b.id))
+      .slice(0, query.limit);
+    for (const instance of finished) {
+      this.rows.delete(instance.id);
+    }
+
+    const newest = this.lastSignalId();
+    const cursors = [...this.rows.values()].filter((row) => RUNNABLE.has(row.instance.status)).map((row) => row.instance.signalCursor);
+    const floor = Math.min(newest, ...cursors);
+    const prunable = new Set(
+      this.signalLog
+        .filter((s) => s.id <= floor && s.id < newest && s.createdAt < query.before)
+        .slice(0, query.limit)
+        .map((s) => s.id),
+    );
+    const kept = this.signalLog.filter((s) => !prunable.has(s.id));
+    this.signalLog.splice(0, this.signalLog.length, ...kept);
+
+    return { instances: finished.length, signals: prunable.size };
   }
 
   async claim(request: WorkflowClaimRequest): Promise<WorkflowClaim> {

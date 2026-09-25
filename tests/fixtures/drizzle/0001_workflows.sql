@@ -49,5 +49,6 @@ ALTER TABLE "workflow_journal" ADD CONSTRAINT "workflow_journal_instance_id_work
 ALTER TABLE "workflow_waits" ADD CONSTRAINT "workflow_waits_instance_id_workflow_instances_id_fk" FOREIGN KEY ("instance_id") REFERENCES "public"."workflow_instances"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "workflow_instances_due" ON "workflow_instances" USING btree ("wake_at") WHERE "workflow_instances"."wake_at" IS NOT NULL;--> statement-breakpoint
 CREATE INDEX "workflow_instances_created" ON "workflow_instances" USING btree ("created_at","id");--> statement-breakpoint
+CREATE INDEX "workflow_instances_status" ON "workflow_instances" USING btree ("status","updated_at");--> statement-breakpoint
 CREATE INDEX "workflow_signals_lookup" ON "workflow_signals" USING btree ("name","key","id");--> statement-breakpoint
 CREATE INDEX "workflow_waits_signal" ON "workflow_waits" USING btree ("signal","key");

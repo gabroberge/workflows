@@ -340,6 +340,66 @@ export function workflowStoreContract(
     equal((await t.claim(0)).lastSignalId, plain[1]!.id, 'the last signal id');
   });
 
+  // ---------------------------------------------------------------- retention
+
+  add('purge() deletes old finished instances of the given statuses, oldest first, with their journals', async (t) => {
+    const finish = async (id: string, status: 'completed' | 'failed' | 'cancelled' | 'compensation_failed', at: number) => {
+      await t.create(id);
+      await t.claim(0, { token: `t-${id}`, leaseUntil: FAR });
+      await t.store.write(id, `t-${id}`, { now: at, entries: [entry('only')], status, error: null, release: { wakeAt: null, waits: [], signalCursor: 0 } });
+    };
+    await finish('done-2', 'completed', 200);
+    await finish('done-1', 'completed', 100);
+    await finish('failed', 'failed', 150);
+    await finish('stuck', 'compensation_failed', 50);
+    await finish('recent', 'completed', 1_000);
+    await t.create('pending');
+    await t.create('parked');
+    await t.claim(0, { token: 'p', leaseUntil: FAR, limit: 10 });
+    await t.store.write('parked', 'p', { now: 10, entries: [entry('wait', { kind: 'signal', status: 'pending' })], status: 'suspended', release: { wakeAt: null, waits: [{ signal: 's', key: 'k' }], signalCursor: 0 } });
+
+    const statuses = ['completed', 'failed', 'cancelled'] as const;
+    equal(await t.store.purge({ statuses: [...statuses], before: 500, limit: 2 }), { instances: 2, signals: 0 }, 'the first batch');
+    equal(await t.store.get('done-1'), null, 'the oldest, gone');
+    equal(await t.store.get('failed'), null, 'the next oldest, gone');
+    expect(await t.store.get('done-2', { journal: true }), { status: 'completed', journal: [{ name: 'only' }] }, 'past the limit: kept');
+
+    equal(await t.store.purge({ statuses: [...statuses], before: 500, limit: 2 }), { instances: 1, signals: 0 }, 'the next batch');
+    equal(await t.store.purge({ statuses: [...statuses], before: 500, limit: 2 }), { instances: 0, signals: 0 }, 'nothing left');
+    const left = (await t.store.list({ limit: 100, offset: 0 })).map((i) => i.id).sort();
+    equal(left, ['parked', 'pending', 'recent', 'stuck'], 'unfinished, too recent, and another status: kept');
+    expect(await t.store.get('parked', { journal: true }), { waits: [{ signal: 's', key: 'k' }], journal: [{ name: 'wait' }] }, 'an unfinished instance, untouched');
+
+    equal(await t.store.purge({ statuses: ['compensation_failed'], before: 500, limit: 10 }), { instances: 1, signals: 0 }, 'compensation_failed, when asked for');
+    // A purged id can be started again.
+    expect(await t.create('done-1'), { created: true, instance: { status: 'pending' } }, 'the id, free again');
+  });
+
+  add('purge() deletes signals no instance can take any more, and never the newest', async (t) => {
+    const send = (payload: number, now: number, dedupeId: string | null = null) => t.store.signal({ name: 's', key: 'k', dedupeId, payload, now });
+    await send(1, 10, 'evt-1');
+    const s2 = await send(2, 20);
+    await t.create('waiting'); // takes signals above s2 only
+    const s3 = await send(3, 30);
+    const s4 = await send(4, 40);
+    const all = () => t.store.signals({ name: 's', key: 'k', afterId: 0, upToId: FAR });
+
+    equal(await t.store.purge({ statuses: ['completed'], before: 1_000, limit: 1 }), { instances: 0, signals: 1 }, 'one at a time');
+    equal((await all()).map((s) => s.id), [s2.id, s3.id, s4.id], 'the lowest id first');
+    equal(await t.store.purge({ statuses: ['completed'], before: 1_000, limit: 10 }), { instances: 0, signals: 1 }, 'up to the cursor');
+    equal((await all()).map((s) => s.id), [s3.id, s4.id], "the signals an unfinished instance can still take: kept");
+
+    await t.claim(0, { token: 't', leaseUntil: FAR });
+    await t.store.write('waiting', 't', { now: 50, entries: [], status: 'completed', error: null, release: { wakeAt: null, waits: [], signalCursor: s4.id } });
+    equal(await t.store.purge({ statuses: ['completed'], before: 35, limit: 10 }), { instances: 0, signals: 1 }, 'only the old enough');
+    equal((await all()).map((s) => s.id), [s4.id], 's3 is old enough, s4 too recent');
+    equal(await t.store.purge({ statuses: ['completed'], before: 1_000, limit: 10 }), { instances: 1, signals: 0 }, 'the newest stays');
+    equal((await t.claim(0)).lastSignalId, s4.id, 'the last signal id');
+    expect(await t.create('later'), { instance: { signalCursor: s4.id } }, "a new instance's cursor");
+    expect(await send(5, 60), { created: true }, 'the next signal');
+    expect(await send(1, 70, 'evt-1'), { created: true }, 'a dedupe id, stored again once its signal was purged');
+  });
+
   // ---------------------------------------------------------------- cancel
 
   add('requestCancel() accepts once, for pending, running and suspended instances only', async (t) => {
@@ -612,6 +672,47 @@ export function workflowStoreContract(
 
       const accepted = await Promise.all(Array.from({ length: 8 }, (_, i) => jitter().then(() => t.store.requestCancel('same', `r${i}`, 10))));
       equal(accepted.filter(Boolean).length, 1, 'one cancel accepted');
+    });
+
+    add('purge() racing finishing, starting and signalling instances deletes only what was finished and unreachable', async (t) => {
+      const n = 30;
+      for (let i = 0; i < n; i++) {
+        await t.create(`p${i}`);
+      }
+      await t.claim(1, { limit: n, token: 't', leaseUntil: FAR });
+      for (let i = 0; i < 10; i++) {
+        await t.store.signal({ name: 'old', key: null, dedupeId: null, payload: i, now: 0 });
+      }
+
+      let purging = true;
+      const purger = async () => {
+        while (purging) {
+          await t.store.purge({ statuses: ['completed'], before: 1_000, limit: 3 });
+          await jitter();
+        }
+      };
+      const work = Array.from({ length: n }, async (_, i) => {
+        await jitter();
+        if (i % 2 === 0) {
+          await t.store.write(`p${i}`, 't', { now: 10, entries: [], status: 'completed', error: null, release: { wakeAt: null, waits: [], signalCursor: 0 } });
+        } else {
+          await t.store.create({ id: `new${i}`, workflow: W.name, version: W.version, input: null, deadline: null, now: 2_000 });
+          await t.store.signal({ name: 'new', key: null, dedupeId: null, payload: i, now: 2_000 });
+        }
+      });
+
+      const purgers = [purger(), purger()];
+      await Promise.all(work);
+      purging = false;
+      await Promise.all(purgers);
+      while ((await t.store.purge({ statuses: ['completed'], before: 1_000, limit: 3 })).instances > 0) {
+        // the rest of the finished ones
+      }
+
+      const left = (await t.store.list({ limit: 100, offset: 0 })).map((i) => i.id);
+      equal(left.filter((id) => id.startsWith('p')).length, n / 2, 'every unfinished instance kept, every finished one purged');
+      equal(left.filter((id) => id.startsWith('new')).length, n / 2, 'every new instance kept');
+      equal((await t.store.signals({ name: 'new', key: null, afterId: 0, upToId: FAR })).length, n / 2, 'every recent signal kept');
     });
 
     add("a stale lease holder's writes never land, however they interleave with the new holder's", async (t) => {

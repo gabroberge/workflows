@@ -346,6 +346,53 @@ describe('signal()', () => {
   });
 });
 
+describe('purge()', () => {
+  it('deletes what finished longer ago than olderThan, batch by batch, and the signals nobody can take', async () => {
+    const node = await start([Echo, Listen]);
+    for (const id of ['old-1', 'old-2', 'old-3']) {
+      await node.client.start(Echo, { id }, { id });
+    }
+    await node.client.start(Listen, undefined, { id: 'listening' });
+    await node.worker.drain();
+    await node.client.signal('value', 0, { key: 'zero' }); // taken by 'listening'
+    await node.worker.drain();
+    await node.client.signal('unheard', 1);
+
+    clock.advance('31d');
+    await node.client.start(Echo, { id: 'recent' }, { id: 'recent' });
+    await node.worker.drain();
+    await node.client.signal('unheard', 2);
+
+    expect(await node.client.purge({ olderThan: '30d', batchSize: 2 })).toEqual({ instances: 3, signals: 0 });
+    expect((await node.client.list()).map((i) => i.id)).toEqual(['listening', 'recent']);
+
+    // Once the listener is gone too, its signals go, except the newest.
+    await node.client.cancel('listening');
+    await node.worker.drain();
+    clock.advance('31d');
+    expect(await node.client.purge({ olderThan: '30d' })).toEqual({ instances: 2, signals: 2 });
+    expect(await node.store.signals({ name: 'unheard', key: null, afterId: 0, upToId: Number.MAX_SAFE_INTEGER })).toMatchObject([{ payload: 2 }]);
+    expect(await node.client.list()).toEqual([]);
+  });
+
+  it('keeps compensation_failed instances unless asked, and refuses unfinished statuses', async () => {
+    const node = await start([Echo]);
+    await node.store.create({ id: 'stuck', workflow: 'echo', version: 1, input: null, deadline: null, now: clock.now() });
+    const [claimed] = (await node.store.claim({ owner: 'w', token: 't', now: clock.now(), leaseUntil: clock.now() + 1_000, limit: 1, workflows: [{ name: 'echo', version: 1 }] })).instances;
+    await node.store.write(claimed!.id, 't', { now: clock.now(), entries: [], status: 'compensation_failed', error: { name: 'Error', message: 'x' }, release: { wakeAt: null, waits: [], signalCursor: 0 } });
+    clock.advance('1d');
+
+    expect(await node.client.purge({ olderThan: '1h' })).toEqual({ instances: 0, signals: 0 });
+    expect(await node.client.purge({ olderThan: '1h', status: 'compensation_failed' })).toEqual({ instances: 1, signals: 0 });
+
+    await expect(node.client.purge({ olderThan: '1h', status: ['completed', 'running'] })).rejects.toThrow(
+      new TypeError('purge(): status must list finished statuses (completed, failed, cancelled, compensation_failed), not running. Cancel an unfinished instance first.'),
+    );
+    await expect(node.client.purge({ olderThan: '1h', batchSize: 0 })).rejects.toThrow('purge(): batchSize (0) must be a positive integer.');
+    await expect(node.client.purge({ olderThan: 'a month' as never })).rejects.toThrow(TypeError);
+  });
+});
+
 // No store involved: once.
 describe.runIf(storeKind === 'memory')('transactions on a store without the optional methods', () => {
   /** A store that implements only the required methods. */
@@ -357,6 +404,7 @@ describe.runIf(storeKind === 'memory')('transactions on a store without the opti
     requestCancel = this.inner.requestCancel.bind(this.inner);
     signal = this.inner.signal.bind(this.inner);
     signals = this.inner.signals.bind(this.inner);
+    purge = this.inner.purge.bind(this.inner);
     claim = this.inner.claim.bind(this.inner);
     renew = this.inner.renew.bind(this.inner);
     write = this.inner.write.bind(this.inner);

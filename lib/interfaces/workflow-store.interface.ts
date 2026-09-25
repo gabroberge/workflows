@@ -85,6 +85,25 @@ export interface WorkflowStore {
   /** Signals named `name` with exactly `key` and `afterId < id <= upToId`, by id. */
   signals(query: WorkflowSignalQuery): Promise<WorkflowSignalRecord[]>;
 
+  // ---------------------------------------------------------------- retention
+
+  /**
+   * Deletes, oldest `updatedAt` first, up to `limit` instances whose status is one of
+   * `statuses` (finished ones only) and whose `updatedAt` is below `before`, with their
+   * journals and waits. Re-check the status and `updatedAt` on the rows it deletes (in the
+   * `DELETE`'s own `WHERE`, not only in a subquery), so an instance that an operator reopened in
+   * the meantime stays.
+   *
+   * Also deletes, lowest id first, up to `limit` signals no instance can take any more: an
+   * instance only takes signals with an id above its `signalCursor`, and a new one starts at the
+   * last signal id. So a signal can go when its id is at or below the lowest `signalCursor` of
+   * the unfinished instances (`pending`, `running`, `suspended`, `compensating`), its
+   * `createdAt` is below `before` (its `dedupeId` keeps deduplicating until then), and it isn't
+   * the newest signal (which keeps the last signal id from going back). Returns how many
+   * instances and signals it deleted. Each delete is one statement; nothing else is atomic.
+   */
+  purge(query: WorkflowPurgeQuery): Promise<WorkflowPurgeResult>;
+
   // ---------------------------------------------------------------- the worker
 
   /**
@@ -170,6 +189,22 @@ export interface WorkflowSignalResult {
   created: boolean;
   /** The stored signal's key: the given one, or with `created: false` the earlier signal's. */
   key: string | null;
+}
+
+/** What `WorkflowStore.purge()` receives. */
+export interface WorkflowPurgeQuery {
+  /** Finished statuses to delete (at least one). */
+  statuses: WorkflowStatus[];
+  /** Instances whose `updatedAt` (when they finished), and signals whose `createdAt`, is below this. */
+  before: number;
+  /** At least 1: the most instances, and the most signals, one call deletes. */
+  limit: number;
+}
+
+/** How many instances and signals a purge deleted. */
+export interface WorkflowPurgeResult {
+  instances: number;
+  signals: number;
 }
 
 export interface WorkflowSignalQuery {

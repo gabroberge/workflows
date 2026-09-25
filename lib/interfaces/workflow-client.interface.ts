@@ -94,3 +94,21 @@ export interface WorkflowListFilter {
   limit?: number;
   offset?: number;
 }
+
+/** What `purge()` takes. */
+export interface WorkflowPurgeOptions {
+  /**
+   * How long finished instances are kept, such as `'30d'`: instances that finished longer ago
+   * go, with their journals, and so do signals older than this that no unfinished instance can
+   * take. A signal's `id` deduplicates until its signal is purged, so keep this longer than any
+   * sender's redelivery window, and longer than your longest transaction.
+   */
+  olderThan: Duration;
+  /**
+   * The finished statuses to purge. Default `completed`, `failed` and `cancelled`:
+   * `compensation_failed` instances wait for a person, so they go only when listed.
+   */
+  status?: WorkflowStatus | WorkflowStatus[];
+  /** Instances, and signals, deleted per statement. Default 500. */
+  batchSize?: number;
+}

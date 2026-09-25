@@ -32,9 +32,30 @@ class NightlyInvoicesJob {
   }
 }
 
+/** Retention, as the docs' production checklist runs it: nightly, on one pod. */
+@Injectable()
+class WorkflowRetentionJob {
+  constructor(private readonly workflowClient: WorkflowClient) {}
+
+  // With @nestjs/schedule: @Cron('30 3 * * *') here too.
+  @OnOneInstance({ key: 'workflows:purge' })
+  async purge() {
+    return this.workflowClient.purge({ olderThan: '30d' });
+  }
+}
+
 @Controller('admin/jobs')
 class JobsController {
-  constructor(private readonly nightlyInvoicesJob: NightlyInvoicesJob) {}
+  constructor(
+    private readonly nightlyInvoicesJob: NightlyInvoicesJob,
+    private readonly workflowRetentionJob: WorkflowRetentionJob,
+  ) {}
+
+  @Post('workflow-retention')
+  async retention() {
+    const purged = await this.workflowRetentionJob.purge();
+    return purged === undefined ? { ran: false } : { ran: true, ...purged };
+  }
 
   @Post('nightly-invoices/:day')
   async trigger(@Param('day') day: string) {
@@ -72,7 +93,7 @@ describe.each(adapters)('a scheduled job that starts workflows on one pod ($name
       clock,
       imports: [LocksModule.forRoot({ clock: lockClock })],
       workflows: [InvoiceRun],
-      providers: [{ provide: World, useValue: world }, NightlyInvoicesJob],
+      providers: [{ provide: World, useValue: world }, NightlyInvoicesJob, WorkflowRetentionJob],
       controllers: [JobsController],
       setup: (app) => app.get(LocksStorage).registerSource(lockStore, { replace: true }),
     });
@@ -104,5 +125,18 @@ describe.each(adapters)('a scheduled job that starts workflows on one pod ($name
     expect((await b.http('POST', '/admin/jobs/nightly-invoices/2026-01-02')).body).toEqual({ ran: true, created: true, id: 'invoices-2026-01-02' });
     await b.worker.drain();
     expect((await b.client.list({ status: 'completed' })).map((instance) => instance.id)).toEqual(['invoices-2026-01-01', 'invoices-2026-01-02']);
+  });
+
+  it('purges finished runs older than 30 days on the pod that owns the retention job', async () => {
+    const [a, b] = [await boot(), await boot()];
+    await a.http('POST', '/admin/jobs/nightly-invoices/2026-01-01');
+    await a.worker.drain();
+    clock.advance('31d');
+    await a.http('POST', '/admin/jobs/nightly-invoices/2026-02-01');
+    await a.worker.drain();
+
+    expect((await a.http('POST', '/admin/jobs/workflow-retention')).body).toEqual({ ran: true, instances: 1, signals: 0 });
+    expect((await b.http('POST', '/admin/jobs/workflow-retention')).body).toEqual({ ran: false });
+    expect((await a.client.list()).map((instance) => instance.id)).toEqual(['invoices-2026-02-01']);
   });
 });

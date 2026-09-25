@@ -193,6 +193,9 @@ class InMemoryAppStore implements WorkflowStore {
   signals(...args: Parameters<WorkflowStore['signals']>) {
     return this.db.signals(...args);
   }
+  purge(...args: Parameters<WorkflowStore['purge']>) {
+    return this.db.purge(...args);
+  }
   claim(...args: Parameters<WorkflowStore['claim']>) {
     return this.db.claim(...args);
   }

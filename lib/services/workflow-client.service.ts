@@ -1,17 +1,17 @@
 import { randomUUID } from 'node:crypto';
 import { Inject, Injectable, type Type } from '@nestjs/common';
 import { systemClock } from '../utils/clock.util.js';
-import { runTimeoutMs } from '../utils/duration.util.js';
+import { runTimeoutMs, toMs } from '../utils/duration.util.js';
 import type { WorkflowClock } from '../interfaces/workflow-clock.interface.js';
 import { WorkflowIdConflictError } from '../errors/workflow-id-conflict.error.js';
 import { WorkflowNotFoundError } from '../errors/workflow-not-found.error.js';
-import type { WorkflowInstance, WorkflowJournalEntry } from '../interfaces/workflow-instance.interface.js';
+import type { WorkflowInstance, WorkflowJournalEntry, WorkflowStatus } from '../interfaces/workflow-instance.interface.js';
 import type { WorkflowInput } from '../interfaces/workflow-runner.interface.js';
 import { normalize } from './workflow-execution.service.js';
 import { signalName, type WorkflowSignal } from '../signals/workflow.signal.js';
 import { WorkflowStorage } from '../storage/workflow.storage.js';
 import { stepSignalId, stepStartId } from '../utils/step-scope.util.js';
-import type { WorkflowInstanceDetails, WorkflowStore } from '../interfaces/workflow-store.interface.js';
+import type { WorkflowInstanceDetails, WorkflowPurgeResult, WorkflowStore } from '../interfaces/workflow-store.interface.js';
 import { WorkflowRegistry } from './workflow-registry.service.js';
 import { WorkflowWorker } from './workflow-worker.service.js';
 import { WORKFLOWS_MODULE_OPTIONS } from '../workflows.module-definition.js';
@@ -22,6 +22,7 @@ import type {
   WorkflowStartResult,
   WorkflowCancelResult,
   WorkflowListFilter,
+  WorkflowPurgeOptions,
   WorkflowSignalSendResult,
 } from '../interfaces/workflow-client.interface.js';
 
@@ -189,6 +190,38 @@ export class WorkflowClient {
     return { signalId: result.id, woken: result.woken, created: result.created };
   }
 
+  /**
+   * Deletes finished instances older than `olderThan`, with their journals, and the signals no
+   * unfinished instance can take any more, in batches until none is left. Returns how many of
+   * each it deleted. Run it from a scheduled job; concurrent runs are safe, only wasteful.
+   */
+  async purge(options: WorkflowPurgeOptions): Promise<WorkflowPurgeResult> {
+    const olderThan = toMs(options.olderThan);
+    const statuses = options.status === undefined ? DEFAULT_PURGE : Array.isArray(options.status) ? options.status : [options.status];
+    const unfinished = statuses.filter((status) => !FINISHED.includes(status));
+    if (statuses.length === 0 || unfinished.length > 0) {
+      throw new TypeError(
+        `purge(): status must list finished statuses (${FINISHED.join(', ')}), not ${unfinished.length ? unfinished.join(', ') : 'none'}. ` +
+          'Cancel an unfinished instance first.',
+      );
+    }
+    const limit = options.batchSize ?? 500;
+    if (!Number.isSafeInteger(limit) || limit < 1) {
+      throw new TypeError(`purge(): batchSize (${limit}) must be a positive integer.`);
+    }
+
+    const before = this.clock.now() - olderThan;
+    const total = { instances: 0, signals: 0 };
+    for (;;) {
+      const batch = await this.store.purge({ statuses, before, limit });
+      total.instances += batch.instances;
+      total.signals += batch.signals;
+      if (batch.instances < limit && batch.signals < limit) {
+        return total;
+      }
+    }
+  }
+
   /** The store's method for joining the application's transaction, bound; throws if it has none. */
   private storeMethod<M extends 'createInTransaction' | 'signalInTransaction'>(method: M, caller: string): NonNullable<WorkflowStore[M]> {
     const store = this.store;
@@ -203,6 +236,9 @@ export class WorkflowClient {
     return fn.bind(store) as NonNullable<WorkflowStore[M]>;
   }
 }
+
+const FINISHED: WorkflowStatus[] = ['completed', 'failed', 'cancelled', 'compensation_failed'];
+const DEFAULT_PURGE: WorkflowStatus[] = ['completed', 'failed', 'cancelled'];
 
 /** Internal: JSON with sorted object keys, to compare inputs and payloads. */
 export function canonical(value: unknown): string {

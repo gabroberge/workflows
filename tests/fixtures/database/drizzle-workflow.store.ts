@@ -9,6 +9,8 @@ import {
   type WorkflowInstance,
   type WorkflowInstanceDetails,
   type WorkflowListQuery,
+  type WorkflowPurgeQuery,
+  type WorkflowPurgeResult,
   type WorkflowSignalQuery,
   type WorkflowSignalRecord,
   type WorkflowSignalResult,
@@ -118,6 +120,30 @@ export class DrizzleWorkflowStore implements WorkflowStore {
       .from(signals)
       .where(and(eq(signals.name, query.name), keyIs(signals.key, query.key), gt(signals.id, query.afterId), lte(signals.id, query.upToId)))
       .orderBy(asc(signals.id));
+  }
+
+  // ---------------------------------------------------------------- retention
+
+  async purge(query: WorkflowPurgeQuery): Promise<WorkflowPurgeResult> {
+    const finished = and(inArray(instances.status, query.statuses), lt(instances.updatedAt, query.before));
+    const oldest = this.db.select({ id: instances.id }).from(instances).where(finished).orderBy(asc(instances.updatedAt), asc(instances.id)).limit(query.limit);
+    // `finished` again on the deleted rows: an instance reopened since the subquery read it stays.
+    // Its journal and waits go with it (ON DELETE CASCADE).
+    const purged = await this.db.delete(instances).where(and(inArray(instances.id, oldest), finished)).returning({ id: instances.id });
+
+    // Signals no instance can take: at or below every unfinished instance's cursor (new ones start
+    // at the newest signal), old enough, and never the newest, so the last signal id never goes back.
+    const newest = sql`(SELECT max(${signals.id}) FROM ${signals})`;
+    const floor = sql`coalesce((SELECT min(${instances.signalCursor}) FROM ${instances} WHERE ${inArray(instances.status, RUNNABLE)}), ${newest})`;
+    const prunable = this.db
+      .select({ id: signals.id })
+      .from(signals)
+      .where(and(lt(signals.createdAt, query.before), lt(signals.id, newest), lte(signals.id, floor)))
+      .orderBy(asc(signals.id))
+      .limit(query.limit);
+    const pruned = await this.db.delete(signals).where(inArray(signals.id, prunable)).returning({ id: signals.id });
+
+    return { instances: purged.length, signals: pruned.length };
   }
 
   // ---------------------------------------------------------------- the worker

@@ -41,6 +41,8 @@ export const workflowInstances = pgTable(
     // What claims look for: due instances.
     index('workflow_instances_due').on(t.wakeAt).where(sql`${t.wakeAt} IS NOT NULL`),
     index('workflow_instances_created').on(t.createdAt, t.id),
+    // What purges and list() by status look for.
+    index('workflow_instances_status').on(t.status, t.updatedAt),
   ],
 );
 
