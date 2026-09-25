@@ -24,6 +24,7 @@ import { SignalOn, StartOn } from '../lib/cqrs/index.js';
 import { Workflow, WorkflowClient, WorkflowSignal, type WorkflowContext } from '../lib/index.js';
 import type { Database } from './fixtures/database/drizzle.js';
 import { orders } from './fixtures/database/schema.js';
+import { deferred, forever } from './support.js';
 
 export class OrderPlacedEvent {
   constructor(
@@ -58,6 +59,19 @@ export class Ledger {
   readonly saga: string[] = [];
   /** Look the instance up from the events handler (not while the publisher's transaction is open). */
   lookUpInstances = true;
+  /** Where the process "dies": `pause(at)` there never returns, as a step the process died in. */
+  pauseAt: string | null = null;
+  readonly paused = deferred();
+
+  async pause(at: string) {
+    if (this.pauseAt !== at) {
+      return;
+    }
+
+    this.pauseAt = null;
+    this.paused.resolve();
+    await forever();
+  }
 }
 
 export class ReserveStockCommand extends Command<{ reservationId: string }> {
@@ -78,6 +92,7 @@ export class ReserveStockHandler implements ICommandHandler<ReserveStockCommand>
     if (!this.ledger.reservations.has(idempotencyKey)) {
       this.ledger.reservations.set(idempotencyKey, orderId);
     }
+    await this.ledger.pause('reserve-stock');
     return { reservationId: idempotencyKey };
   }
 }
@@ -98,6 +113,7 @@ export class OrderFulfilmentWorkflow {
   constructor(
     private readonly commandBus: CommandBus,
     private readonly eventBus: EventBus,
+    @Optional() @Inject(Ledger) private readonly ledger?: Ledger,
   ) {}
 
   async run(ctx: WorkflowContext, order: { orderId: string; total: number }) {
@@ -109,7 +125,10 @@ export class OrderFulfilmentWorkflow {
     const { reservationId } = await ctx.step('reserve-stock', ({ idempotencyKey }) =>
       this.commandBus.execute(new ReserveStockCommand(order.orderId, idempotencyKey)),
     );
-    await ctx.step('announce-ready', () => this.eventBus.publish(new OrderReadyEvent(order.orderId)));
+    await ctx.step('announce-ready', async () => {
+      await this.ledger?.pause('announce-ready');
+      await this.eventBus.publish(new OrderReadyEvent(order.orderId));
+    });
     return { chargeId: payment.chargeId, reservationId };
   }
 }

@@ -10,7 +10,7 @@ import { CommandBus, CqrsModule, EventBus } from '@nestjs/cqrs';
 import { sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import pg from 'pg';
-import { SignalOn, WorkflowsCqrsModule } from '../lib/cqrs/index.js';
+import { SignalOn, StartOn, WorkflowsCqrsModule } from '../lib/cqrs/index.js';
 import { ManualWorkflowClock, Workflow, WorkflowIdConflictError, WorkflowSignal, type WorkflowContext } from '../lib/index.js';
 import {
   CapturePaymentCommand,
@@ -52,14 +52,42 @@ class PackingWorkflow {
   }
 }
 
-/** Counts the parcels packed for an order, waiting up to an hour for a second one. */
+/** Counts the parcels packed for an order, waiting up to an hour for a second one. Its first parcel starts it. */
 @Workflow('dispatch')
+@StartOn(ParcelPackedEvent, { id: (event) => `dispatch-${event.orderId}`, input: (event) => ({ orderId: event.orderId }) })
 @SignalOn(ParcelPackedEvent, { signal: parcelPacked, key: (event) => event.orderId, payload: (event) => ({ orderId: event.orderId }) })
 class DispatchWorkflow {
   async run(ctx: WorkflowContext, { orderId }: { orderId: string }) {
     await ctx.waitForSignal('first-parcel', parcelPacked, { key: orderId });
     const second = await ctx.waitForSignal('second-parcel', parcelPacked, { key: orderId, timeout: '1h' });
     return { parcels: second === null ? 1 : 2 };
+  }
+}
+
+class ParcelLabelledEvent {
+  constructor(
+    readonly orderId: string,
+    readonly carrier: string,
+  ) {}
+}
+
+class LabelScannedEvent {
+  constructor(
+    readonly orderId: string,
+    readonly depot: string,
+  ) {}
+}
+
+const labelScanned = new WorkflowSignal<LabelScannedEvent>('label.scanned');
+
+/** Maps its events with neither `input` nor `payload`: the events themselves. */
+@Workflow('labelling')
+@StartOn(ParcelLabelledEvent, { id: (event) => `labelling-${event.orderId}` })
+@SignalOn(LabelScannedEvent, { signal: labelScanned, key: (event) => event.orderId })
+class LabellingWorkflow {
+  async run(ctx: WorkflowContext, label: ParcelLabelledEvent) {
+    const scan = await ctx.waitForSignal('scanned', labelScanned, { key: label.orderId });
+    return { label, scan };
   }
 }
 
@@ -190,7 +218,7 @@ describe('workflows started and signalled by CQRS events', () => {
     expect(await node.client.getStatus(fulfilmentId('o-1'))).toMatchObject({ status: 'completed' });
   });
 
-  it('sends a mapped signal once from a step that published its event and was retried', async () => {
+  it('starts once and sends a mapped signal once from a step that published its event and was retried', async () => {
     const node = await boot({
       db,
       clock,
@@ -199,7 +227,6 @@ describe('workflows started and signalled by CQRS events', () => {
     });
     nodes.push(node);
 
-    await node.client.start(DispatchWorkflow, { orderId: 'o-1' }, { id: 'dispatch-o-1' });
     await node.client.start(PackingWorkflow, { orderId: 'o-1' }, { id: 'packing-o-1' });
     await node.worker.drain();
     clock.advance('1s'); // the packing step's retry
@@ -209,10 +236,27 @@ describe('workflows started and signalled by CQRS events', () => {
       journal: [{ name: 'pack', status: 'completed', attempts: 2 }],
     });
 
-    // Two attempts published ParcelPackedEvent; one signal was stored, so the second wait times out.
+    // Two attempts published ParcelPackedEvent: the second found the instance the first started, and
+    // one signal was stored, so the second wait times out.
+    expect((await node.client.list({ workflow: 'dispatch' })).map(({ id }) => id)).toEqual(['dispatch-o-1']);
     clock.advance('1h');
     await node.worker.drain();
     expect(await node.client.getStatus('dispatch-o-1')).toMatchObject({ status: 'completed', output: { parcels: 1 } });
+  });
+
+  it('starts with the event as input, and signals with it as payload, when the mapping leaves them out', async () => {
+    const node = await boot({ db, clock, imports: [CqrsModule.forRoot(), WorkflowsCqrsModule], workflows: [LabellingWorkflow] });
+    nodes.push(node);
+
+    await node.moduleRef.get(EventBus).publish(new ParcelLabelledEvent('o-1', 'dpd'));
+    await node.worker.drain();
+    await node.moduleRef.get(EventBus).publish(new LabelScannedEvent('o-1', 'leeds'));
+    await node.worker.drain();
+    expect(await node.client.getStatus('labelling-o-1')).toMatchObject({
+      status: 'completed',
+      input: { orderId: 'o-1', carrier: 'dpd' },
+      output: { label: { orderId: 'o-1', carrier: 'dpd' }, scan: { orderId: 'o-1', depot: 'leeds' } },
+    });
   });
 
   it('rejects publish() when a start fails, and hands the event to no handler', async () => {
@@ -309,6 +353,17 @@ describe('workflows started and signalled by CQRS events', () => {
 
       expect(await orderIds()).toEqual(['o-1']);
       expect(await instanceIds()).toEqual([fulfilmentId('o-1')]);
+    });
+
+    it('rolls the order back when its start fails, which rejects publish()', async () => {
+      const node = await start();
+      await node.commandBus.execute(new PlaceOrderCommand('o-1', 2499));
+      await database.execute(sql`DELETE FROM orders`);
+
+      // Placed again with another total: the instance with that id can't be the one the event asks for.
+      await expect(node.commandBus.execute(new PlaceOrderCommand('o-1', 9999))).rejects.toThrow(WorkflowIdConflictError);
+      expect(await orderIds()).toEqual([]);
+      expect(await node.client.getStatus(fulfilmentId('o-1'))).toMatchObject({ input: { orderId: 'o-1', total: 2499 } });
     });
 
     it.runIf(storeKind === 'postgres')('starts one instance when concurrent transactions publish the same event', async () => {
