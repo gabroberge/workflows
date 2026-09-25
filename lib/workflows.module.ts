@@ -18,7 +18,8 @@ import type { WorkflowsModuleOptions } from './interfaces/workflows-module-optio
 @Module({
   imports: [DiscoveryModule],
   providers: [WorkflowStorage, WorkflowRegistry, WorkflowEvents, WorkflowWorker, WorkflowClient],
-  exports: [WorkflowStorage, WorkflowClient, WorkflowWorker, WorkflowEvents],
+  // WorkflowRegistry is not public API (nor in the barrel): WorkflowsCqrsModule reads it.
+  exports: [WorkflowStorage, WorkflowClient, WorkflowWorker, WorkflowEvents, WorkflowRegistry],
 })
 export class WorkflowsModule extends ConfigurableModuleClass implements OnModuleInit {
   static forRoot(options: WorkflowsModuleOptions & { isGlobal?: boolean } = {}): DynamicModule {

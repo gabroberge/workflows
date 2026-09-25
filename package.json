@@ -19,6 +19,11 @@
       "import": "./dist/testing/index.js",
       "default": "./dist/testing/index.js"
     },
+    "./cqrs": {
+      "types": "./dist/cqrs/index.d.ts",
+      "import": "./dist/cqrs/index.js",
+      "default": "./dist/cqrs/index.js"
+    },
     "./package.json": "./package.json"
   },
   "engines": {
@@ -44,6 +49,7 @@
     "@electric-sql/pglite": "0.5.8",
     "@nestjs/common": "12.1.0",
     "@nestjs/core": "12.1.0",
+    "@nestjs/cqrs": "12.0.0",
     "@nestjs/drizzle": "0.0.1",
     "@nestjs/locks": "0.0.1",
     "@nestjs/mail": "file:../mail/nestjs-mail-0.0.1.tgz",
@@ -69,8 +75,14 @@
   "peerDependencies": {
     "@nestjs/common": "^11.0.0 || ^12.0.0",
     "@nestjs/core": "^11.0.0 || ^12.0.0",
+    "@nestjs/cqrs": "^11.0.0 || ^12.0.0",
     "reflect-metadata": "^0.1.13 || ^0.2.0",
     "rxjs": "^7.1.0"
+  },
+  "peerDependenciesMeta": {
+    "@nestjs/cqrs": {
+      "optional": true
+    }
   },
   "lint-staged": {
     "**/*.{ts,json}": []

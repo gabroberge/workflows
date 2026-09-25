@@ -29,8 +29,9 @@ export default defineConfig({
         test: {
           name: `workflows:${store}`,
           include: ['tests/**/*.spec.ts'],
-          // The registry's own tests don't touch a store.
-          exclude: [...configDefaults.exclude, 'tests/storage.spec.ts'],
+          // The registry's own tests don't touch a store, and the CQRS checks and routing run
+          // on the in-memory store (cqrs.integration.spec.ts covers the SQL stores).
+          exclude: [...configDefaults.exclude, 'tests/storage.spec.ts', 'tests/cqrs.spec.ts'],
           env: { WORKFLOWS_TEST_STORE: store },
           testTimeout: 20_000,
           hookTimeout: 30_000,

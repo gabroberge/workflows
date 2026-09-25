@@ -3,7 +3,7 @@ import { DiscoveryService } from '@nestjs/core';
 import { WorkflowNotFoundError } from '../errors/workflow-not-found.error.js';
 import type { WorkflowRunner } from '../interfaces/workflow-runner.interface.js';
 import type { WorkflowMetadata } from '../interfaces/workflow-decorator-options.interface.js';
-import { WORKFLOW_METADATA } from '../workflows.constants.js';
+import { WORKFLOW_EVENT_ROUTES_METADATA, WORKFLOW_METADATA } from '../workflows.constants.js';
 
 export interface WorkflowDefinition extends WorkflowMetadata {
   key: string;
@@ -13,10 +13,17 @@ export interface WorkflowDefinition extends WorkflowMetadata {
 
 export const workflowKey = (name: string, version: number) => `${name}@${version}`;
 
+/**
+ * Internal: `WorkflowsCqrsModule` calls it from its publisher's constructor, before any
+ * definition loads. Without it, a workflow mapped from CQRS events fails the startup check.
+ */
+export const ROUTE_EVENTS = Symbol('WorkflowRegistry.routeEvents');
+
 /** Finds every `@Workflow()` provider, wherever it is registered. */
 @Injectable()
 export class WorkflowRegistry {
   private definitions?: Map<string, WorkflowDefinition>;
+  private eventsRouted = false;
 
   constructor(private readonly discovery: DiscoveryService) {}
 
@@ -28,6 +35,10 @@ export class WorkflowRegistry {
   /** The workflow versions this process can run, for claims. */
   versions(): Array<{ name: string; version: number }> {
     return [...this.load().values()].map(({ name, version }) => ({ name, version }));
+  }
+
+  [ROUTE_EVENTS](): void {
+    this.eventsRouted = true;
   }
 
   get(name: string, version: number): WorkflowDefinition | undefined {
@@ -115,6 +126,16 @@ export class WorkflowRegistry {
       const instance = wrapper.instance as WorkflowRunner;
       if (typeof instance?.run !== 'function') {
         throw new Error(`Workflow ${type.name} must have a run(ctx, input) method.`);
+      }
+
+      // The main entry never imports @nestjs/cqrs: the decorators leave metadata, and the
+      // subpath's module marks the registry. Mapped events with no publisher would start nothing.
+      if (!this.eventsRouted && Reflect.getOwnMetadata(WORKFLOW_EVENT_ROUTES_METADATA, type)) {
+        throw new Error(
+          `Workflow ${type.name} is started or signalled by CQRS events (@StartOn(), @SignalOn()), but ` +
+            'WorkflowsCqrsModule is not imported, so publishing those events would start and signal nothing. ' +
+            "Import WorkflowsCqrsModule from '@nestjs/workflows/cqrs' next to CqrsModule.forRoot().",
+        );
       }
       definitions.set(key, { ...meta, key, instance, type });
     }

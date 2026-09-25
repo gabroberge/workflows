@@ -1,6 +1,6 @@
 import { fileURLToPath } from 'node:url';
 import { PGlite } from '@electric-sql/pglite';
-import { Inject, Injectable, Module, type OnApplicationShutdown, type Provider, type Type } from '@nestjs/common';
+import { Inject, Injectable, Module, type DynamicModule, type OnApplicationShutdown, type Provider, type Type } from '@nestjs/common';
 import { getDrizzleToken } from '@nestjs/drizzle';
 import { Test, type TestingModule } from '@nestjs/testing';
 import { sql } from 'drizzle-orm';
@@ -271,6 +271,8 @@ export async function boot(options: {
   db: TestDb;
   workflows: Type<unknown>[];
   providers?: Provider[];
+  /** More modules next to `WorkflowsModule`, such as `CqrsModule.forRoot()`. */
+  imports?: Array<Type<unknown> | DynamicModule>;
   clock?: WorkflowClock;
   worker?: WorkflowWorkerOptions;
   retry?: number | false | WorkflowRetryOptions;
@@ -284,6 +286,7 @@ export async function boot(options: {
         retry: options.retry,
         worker: { enabled: false, shutdownTimeout: 50, ...options.worker },
       }),
+      ...(options.imports ?? []),
     ],
     providers: [
       ...options.workflows,
