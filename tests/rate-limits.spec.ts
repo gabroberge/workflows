@@ -43,6 +43,34 @@ class ReportWorkflow {
   }
 }
 
+@Workflow('keyed-child', { rateLimit: { max: 10, duration: '1m', key: (input: { customer: string }) => input.customer } })
+class KeyedChild {
+  async run() {}
+}
+
+/** The same workflow after a deploy whose key function fails on the inputs it had. */
+@Workflow('keyed-child', {
+  rateLimit: {
+    max: 10,
+    duration: '1m',
+    key: () => {
+      throw new Error('No customer in the input.');
+    },
+  },
+})
+class KeyedChildChanged {
+  async run() {}
+}
+
+@Workflow('keyed-parent')
+class KeyedParent {
+  async run(ctx: WorkflowContext) {
+    const child = await ctx.startChild('keyed-child', { customer: 'c-1' }, { parentClose: 'abandon' });
+    await ctx.sleep('nap', '1h');
+    return child.id;
+  }
+}
+
 let db: TestDb;
 let clock: ManualWorkflowClock;
 let world: World;
@@ -161,6 +189,20 @@ it("takes start()'s rateLimitKey over the computed one, and refuses keys and pri
       `start(): invalid priority ${priority}. Use an integer from 1 (first) to 2097151.`,
     );
   }
+});
+
+it("replays a started child without computing its keys again, which a deploy may have changed", async () => {
+  const first = await boot({ db, clock, workflows: [KeyedParent, KeyedChild] });
+  await first.client.start(KeyedParent, undefined, { id: 'parent' });
+  await first.worker.drain();
+  expect(await first.client.getStatus('parent/keyed-child#1')).toMatchObject({ rateLimitKey: 'c-1' });
+  await first.close();
+
+  const second = await boot({ db, clock, workflows: [KeyedParent, KeyedChildChanged] });
+  nodes.push(second);
+  clock.advance('1h');
+  await second.worker.drain();
+  expect(await second.client.getStatus('parent')).toMatchObject({ status: 'completed', output: 'parent/keyed-child#1' });
 });
 
 it('validates the rate limits in the decorator', () => {

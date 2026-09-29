@@ -597,27 +597,20 @@ export class WorkflowExecution {
     const resolved = this.deps.resolve(workflow, options.version);
     const n = (this.childCounters.get(resolved.name) ?? 0) + 1;
     this.childCounters.set(resolved.name, n);
-    const child = newInstance(resolved, options.id ?? `${this.instance.id}/${resolved.name}#${n}`, input, {
-      caller: 'startChild()',
-      now: this.deps.clock.now(),
-      timeout: options.timeout,
-      concurrencyKey: options.concurrencyKey,
-      rateLimitKey: options.rateLimitKey,
-      priority: options.priority ?? this.instance.priority,
-      parentId: this.instance.id,
-      parentClose,
-    });
+    const id = options.id ?? `${this.instance.id}/${resolved.name}#${n}`;
 
-    const name = `$child:${child.id}`;
+    // The journal first: a replay returns the child it started, whatever the keys of its workflow's limits
+    // compute today (a deploy may change them); they are computed only to start it.
+    const name = `$child:${id}`;
     this.visit(name, 'child', true);
-    const request: ChildRequest = { id: child.id, workflow: child.workflow, input: createHash('sha256').update(canonical(child.input ?? null)).digest('base64url') };
+    const request: ChildRequest = { id, workflow: resolved.name, input: createHash('sha256').update(canonical(normalize(input) ?? null)).digest('base64url') };
     const entry = this.journal.get(name);
     if (entry && entry.status !== 'pending') {
       const recorded = entry.data as ChildRequest;
       if (recorded.workflow !== request.workflow || recorded.input !== request.input) {
         throw this.setFatal(
           new WorkflowNonDeterminismError(
-            `${this.describe()} does not match its journal: child "${child.id}" was started as "${recorded.workflow}"` +
+            `${this.describe()} does not match its journal: child "${id}" was started as "${recorded.workflow}"` +
               `${recorded.workflow === request.workflow ? ' with another input' : ''}, but the code now starts "${request.workflow}". ` +
               'Children started from parallel branches need ids of their own ({ id }). ' +
               ADVICE,
@@ -634,6 +627,16 @@ export class WorkflowExecution {
     }
 
     this.assertCanStart();
+    const child = newInstance(resolved, id, input, {
+      caller: 'startChild()',
+      now: this.deps.clock.now(),
+      timeout: options.timeout,
+      concurrencyKey: options.concurrencyKey,
+      rateLimitKey: options.rateLimitKey,
+      priority: options.priority ?? this.instance.priority,
+      parentId: this.instance.id,
+      parentClose,
+    });
     await this.reachFrontier(name);
     this.assertCanStart();
     // Recorded before the child exists, so a parent that crashes right after creating it still
