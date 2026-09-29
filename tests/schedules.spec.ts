@@ -82,6 +82,28 @@ class NewsletterDropped {
   async run() {}
 }
 
+@Workflow('stock-report', {
+  schedules: [
+    {
+      id: 'stock-report',
+      every: '1h',
+      input: ({ at }: { at: number }) => {
+        if (at === Date.UTC(2026, 0, 1, 1)) {
+          throw new Error('The warehouse API is down.');
+        }
+        return { hour: new Date(at).getUTCHours() };
+      },
+    },
+  ],
+})
+class StockReport {
+  constructor(private readonly world: World) {}
+
+  async run(_ctx: WorkflowContext, input: { hour: number }) {
+    this.world.record('stock', String(input.hour));
+  }
+}
+
 let db: TestDb;
 let clock: ManualWorkflowClock;
 let world: World;
@@ -179,6 +201,21 @@ describe('a declared schedule', () => {
     await node.worker.drain();
     expect(world.calls.map((call) => call.key)).toEqual([`2026-01-02 weekly-digest ${iso(hours(30))}`]);
     expect(await node.client.schedules.get('weekly-digest')).toMatchObject({ runs: 0 });
+  });
+});
+
+describe('a declared schedule whose input throws', () => {
+  it('skips an occurrence whose input function throws, logged, and starts the next', async () => {
+    const error = vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    const node = await start([StockReport]);
+    for (const at of [1, 2]) {
+      clock.set(hours(at));
+      await node.worker.drain();
+    }
+
+    expect(world.calls.map((call) => call.key)).toEqual(['2']);
+    expect(error).toHaveBeenCalledWith(`Schedule "stock-report" couldn't start its occurrence of ${iso(hours(1))}: The warehouse API is down.`);
+    expect(await node.client.schedules.get('stock-report')).toMatchObject({ runs: 1, nextAt: hours(3) });
   });
 });
 

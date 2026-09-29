@@ -280,6 +280,7 @@ export class WorkflowScheduler implements OnApplicationBootstrap {
     }
 
     const production: ScheduleProduction = { started: 0, cancelled: [] };
+    let skippedStarts = 0;
     for (const start of st.pending) {
       for (const id of start.cancel) {
         const reason = `Cancelled: schedule "${record.id}" started its occurrence of ${new Date(start.at).toISOString()} (overlap: 'cancel-previous').`;
@@ -287,12 +288,18 @@ export class WorkflowScheduler implements OnApplicationBootstrap {
           production.cancelled.push(id);
         }
       }
-      if ((await this.startOccurrence(record, spec, declared, workflow, start.at, now))?.created) {
+
+      const started = await this.startOccurrence(record, spec, declared, workflow, start.at, now);
+      if (!started) {
+        skippedStarts++;
+      } else if (started.created) {
         production.started++;
       }
     }
 
-    const done: ScheduleState = { ...st, pending: [] };
+    // An occurrence that couldn't start (its input threw) doesn't count toward `limit`.
+    const runs = st.runs - skippedStarts;
+    const done: ScheduleState = { ...st, runs, next: st.next === null && !limitReached(spec, runs) ? nextOccurrence(spec, now) : st.next, pending: [] };
     await this.store.writeSchedule(record.id, token, { now, state: done, wakeAt: wakeAt(done, now), release: true });
     for (const range of skipped) {
       this.events.emit({ type: 'schedule-skipped', id: record.id, workflow: workflow.name, version: workflow.version, at: now, ...range });
