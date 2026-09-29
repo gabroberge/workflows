@@ -29,10 +29,18 @@ type Maybe<T> = T | Promise<T>;
 
 /**
  * An encoded payload as stored: `$wf1:<codec id>:<what the codec returned>`. The prefix tells it from a payload
- * stored before a codec was set (JSON: a string of those would need to start with it), and the codec's id picks
- * the codec that decodes it.
+ * stored as it is (without a codec), and the codec's id picks the codec that decodes it. A payload stored as it is
+ * can't start with the prefix: a string that does (your data, or a signal someone sent) is stored as a `plain`
+ * envelope of its JSON instead, so no payload is ever mistaken for another's envelope.
  */
 const ENVELOPE = '$wf1:';
+
+/** The engine's own envelope for a string that starts like one, when no codec encodes it: its JSON. */
+const PLAIN: WorkflowPayloadCodec = {
+  id: 'plain',
+  encode: (value) => JSON.stringify(value),
+  decode: (data) => JSON.parse(data),
+};
 
 /**
  * @internal The module's codecs: the first encodes, and each payload is decoded by the one whose id it carries.
@@ -49,8 +57,11 @@ export class PayloadCodecs {
       if (codec === null || typeof codec !== 'object' || typeof codec.encode !== 'function' || typeof codec.decode !== 'function') {
         throw new TypeError(`WorkflowsModule's codec: expected a WorkflowPayloadCodec (an object with id, encode() and decode()), got ${String(codec)}.`);
       }
-      if (typeof codec.id !== 'string' || !/^[\w.-]+$/.test(codec.id)) {
-        throw new TypeError(`WorkflowsModule's codec: ${codec.constructor.name} has an invalid id ${JSON.stringify(codec.id)}. Use letters, digits, ".", "_" and "-".`);
+      if (typeof codec.id !== 'string' || !/^[\w.-]+$/.test(codec.id) || codec.id === PLAIN.id) {
+        throw new TypeError(
+          `WorkflowsModule's codec: ${codec.constructor.name} has an invalid id ${JSON.stringify(codec.id)}. Use letters, digits, ".", "_" and "-" ` +
+            `("${PLAIN.id}" is the engine's).`,
+        );
       }
       if (ids.has(codec.id)) {
         throw new TypeError(`WorkflowsModule's codec: two codecs have the id "${codec.id}". Give each its own.`);
@@ -59,16 +70,11 @@ export class PayloadCodecs {
     }
 
     this.writer = codecs[0];
-    this.byId = new Map(codecs.map((codec) => [codec.id, codec]));
-  }
-
-  /** Whether a codec encodes: without one, writes pass as they are. */
-  get encoding(): boolean {
-    return this.writer !== undefined;
+    this.byId = new Map([...codecs, PLAIN].map((codec) => [codec.id, codec]));
   }
 
   encode(value: unknown, context: WorkflowPayloadContext): Maybe<unknown> {
-    const writer = this.writer;
+    const writer = this.writer ?? (encoded(value) ? PLAIN : undefined);
     if (value === undefined || value === null || !writer) {
       return value;
     }
@@ -92,14 +98,18 @@ export class PayloadCodecs {
     return codec.decode(stored.slice(end + 1), context);
   }
 
-  /** An error with its message and stack (and its compensation's) encoded, its name as it is. */
+  /**
+   * An error with its message and stack (and its compensation's) encoded, its name as it is. Without a codec, as it
+   * is, unless its message starts like an envelope.
+   */
   encodeError<E extends SerializedWorkflowError | null | undefined>(error: E, context: WorkflowPayloadContext): Maybe<E> {
-    if (error === null || error === undefined) {
+    if (error === null || error === undefined || (!this.writer && !encoded(error.message) && !encoded(error.compensation?.message))) {
       return error;
     }
 
     const secret = { message: error.message, ...(error.stack === undefined ? {} : { stack: error.stack }) };
-    return then(this.encode(secret, context), (message) =>
+    const writer = this.writer ?? PLAIN;
+    return then(then(writer.encode(secret, context), (data) => `${ENVELOPE}${writer.id}:${data}`), (message) =>
       then(this.encodeError(error.compensation, context), (compensation) => ({ name: error.name, message, ...(compensation ? { compensation } : {}) }) as E),
     );
   }
@@ -162,17 +172,11 @@ export class EncodedWorkflowStore implements WorkflowStore {
   }
 
   async requestCancel(id: string, request: WorkflowCancelRequest): Promise<boolean> {
-    if (!this.codecs.encoding) {
-      return this.inner.requestCancel(id, request);
-    }
     const reason = (await this.codecs.encode(request.reason, { field: 'cancelReason', instanceId: id })) as string | null;
     return this.inner.requestCancel(id, { ...request, reason });
   }
 
   async reopen(id: string, reopen: WorkflowReopen): Promise<boolean> {
-    if (!this.codecs.encoding) {
-      return this.inner.reopen(id, reopen);
-    }
     const [error, entries] = await Promise.all([this.codecs.encodeError(reopen.error, { field: 'error', instanceId: id }), this.encodeEntries(reopen.entries, id)]);
     return this.inner.reopen(id, { ...reopen, error, entries });
   }
@@ -233,9 +237,6 @@ export class EncodedWorkflowStore implements WorkflowStore {
   }
 
   async write(id: string, token: string, write: WorkflowWrite): Promise<boolean> {
-    if (!this.codecs.encoding) {
-      return this.inner.write(id, token, write);
-    }
     const context = (field: WorkflowPayloadContext['field']): WorkflowPayloadContext => ({ field, instanceId: id });
     const [entries, output, error, customStatus, signal] = await Promise.all([
       this.encodeEntries(write.entries, id),

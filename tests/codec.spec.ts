@@ -128,6 +128,20 @@ class ParentOfFailing {
   }
 }
 
+const message = new WorkflowSignal<string>('chat.message');
+
+/** Echoes a signal, or fails with it: strings that look like envelopes, from its caller and from whoever signals it. */
+@Workflow('echo')
+class EchoWorkflow {
+  async run(ctx: WorkflowContext, input: string) {
+    const got = await ctx.waitForSignal('message', message, { key: input });
+    if (got!.startsWith('$wf1:fail')) {
+      ctx.fail(got!);
+    }
+    return `${input} / ${got}`;
+  }
+}
+
 /** Every value it encodes, as `rot13(JSON)`: readable in a test, and not the plaintext. */
 class Rot13Codec implements WorkflowPayloadCodec {
   readonly id = 'rot13';
@@ -289,6 +303,26 @@ describe('a codec', () => {
     await expect(node.client.getStatus('first-key')).rejects.toThrow(
       'A payload of instance "first-key" (input) was encoded by the codec "aes-256-gcm", which WorkflowsModule\'s codec option doesn\'t list.',
     );
+  });
+
+  it('keeps a plain string that starts like an envelope a string, without a codec and with one', async () => {
+    for (const codec of [undefined, aes()]) {
+      const node = await start(codec, [EchoWorkflow]);
+      const prefix = codec ? 'aes' : 'none';
+      await node.client.start(EchoWorkflow, `$wf1:rot13:${prefix}`, { id: `${prefix}-ok` });
+      await node.client.start(EchoWorkflow, `$wf1:x:${prefix}`, { id: `${prefix}-failed` });
+      await node.worker.drain();
+      await node.client.signal(message, '$wf1:aes-256-gcm:forged', { key: `$wf1:rot13:${prefix}` });
+      await node.client.signal(message, '$wf1:fail:forged', { key: `$wf1:x:${prefix}` });
+      await node.worker.drain();
+
+      expect(await node.client.result(`${prefix}-ok`)).toBe(`$wf1:rot13:${prefix} / $wf1:aes-256-gcm:forged`);
+      expect(await node.client.getStatus(`${prefix}-failed`)).toMatchObject({ status: 'failed', input: `$wf1:x:${prefix}`, error: { message: '$wf1:fail:forged' } });
+      if (!codec) {
+        expect((await node.store.get('none-ok'))!.input).toBe(`$wf1:plain:${JSON.stringify('$wf1:rot13:none')}`);
+      }
+      await nodes.pop()!.close();
+    }
   });
 
   it("leaves an instance it can't read to its lease, and runs the others", async () => {
