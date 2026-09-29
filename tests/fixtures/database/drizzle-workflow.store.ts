@@ -270,7 +270,7 @@ export class DrizzleWorkflowStore implements WorkflowStore {
       }
 
       // Drizzle skips undefined values: fields the write leaves out keep their value.
-      const changes = { status: write.status, output: write.output, error: write.error, ...handBack };
+      const changes = { status: write.status, output: write.output, error: write.error, customStatus: write.customStatus, ...handBack };
       if (Object.values(changes).some((value) => value !== undefined)) {
         await tx.update(instances).set({ ...changes, updatedAt: write.now }).where(eq(instances.id, id));
       }

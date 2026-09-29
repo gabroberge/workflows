@@ -13,6 +13,7 @@ CREATE TABLE "workflow_instances" (
 	"cancel_requested" boolean DEFAULT false NOT NULL,
 	"cancel_reason" text,
 	"deadline" bigint,
+	"custom_status" jsonb,
 	"signal_cursor" bigint NOT NULL,
 	"runs" integer DEFAULT 0 NOT NULL,
 	"created_at" bigint NOT NULL,

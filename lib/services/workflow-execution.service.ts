@@ -34,6 +34,7 @@ import type {
 import type { WorkflowRetryOptions } from '../interfaces/workflow-retry-options.interface.js';
 import { resolveRetry, retryDelay, type ResolvedRetry } from '../utils/retry.util.js';
 import { entryBytes } from '../utils/journal-limits.util.js';
+import { canonical } from '../utils/canonical.util.js';
 import type { WorkflowJournalLimits } from '../interfaces/workflows-module-options.interface.js';
 import type { WorkflowEvents } from '../events/workflow-events.service.js';
 import type { WorkflowEvent } from '../events/workflow-events.interface.js';
@@ -165,6 +166,9 @@ export class WorkflowExecution {
   private journalBytes = 0;
   /** Whether the journal is past the warning line: it warns once, when it crosses it. */
   private journalLarge: boolean;
+  /** The last `ctx.setStatus()` value, and the stored one (canonical JSON). */
+  private customStatus: unknown;
+  private storedStatus: string;
   private static readonly logger = new Logger('Workflows');
 
   constructor(
@@ -182,6 +186,8 @@ export class WorkflowExecution {
     }
     // Crossed in an earlier execution, which warned then.
     this.journalLarge = this.pastWarning();
+    this.customStatus = instance.customStatus ?? null;
+    this.storedStatus = canonical(this.customStatus);
 
     for (const entry of journal) {
       const signalId = (entry.result as { signalId?: unknown } | undefined)?.signalId;
@@ -201,6 +207,7 @@ export class WorkflowExecution {
       random: () => this.helper('random', () => Math.random()),
       uuid: () => this.helper('uuid', () => randomUUID()),
       commit: (name) => this.commit(name),
+      setStatus: (status) => this.setStatus(status),
       fail: (message) => {
         this.assertNotInStep('fail()', 'Throw a NonRetryableStepError from the step instead.');
         throw new WorkflowFailedError(message);
@@ -491,6 +498,44 @@ export class WorkflowExecution {
     }
 
     this.compensations.splice(0);
+  }
+
+  private setStatus(status: unknown): void {
+    this.assertNotInStep('setStatus()', 'Set it from run(), before or after the step.');
+    if (this.fatal) {
+      throw this.fatal;
+    }
+
+    let json: string | undefined;
+    try {
+      json = JSON.stringify(status);
+    } catch (error) {
+      throw new TypeError(`ctx.setStatus() takes a JSON-serializable value: ${(error as Error).message}`);
+    }
+
+    const bytes = Buffer.byteLength(json ?? 'null', 'utf8');
+    if (bytes > MAX_CUSTOM_STATUS_BYTES) {
+      throw new TypeError(
+        `ctx.setStatus() got ${bytes} bytes of JSON, over the ${MAX_CUSTOM_STATUS_BYTES}-byte limit. Keep the status a summary; ` +
+          'return large data from the workflow, or keep it in your own tables.',
+      );
+    }
+    this.customStatus = json === undefined ? null : JSON.parse(json);
+  }
+
+  /** `{ customStatus }` when `ctx.setStatus()` changed it since it was last written, else `{}`: spread into a write. */
+  statusChange(): { customStatus?: unknown } {
+    return canonical(this.customStatus) === this.storedStatus ? {} : { customStatus: this.customStatus };
+  }
+
+  /** After a write that carried `change` landed. */
+  statusWritten(change: { customStatus?: unknown }): void {
+    if (!('customStatus' in change)) {
+      return;
+    }
+
+    this.storedStatus = canonical(change.customStatus);
+    this.emit({ type: 'custom-status', status: change.customStatus });
   }
 
   /**
@@ -972,8 +1017,9 @@ export class WorkflowExecution {
       }
 
       let ok: boolean;
+      const change = this.statusChange();
       try {
-        ok = await this.deps.store.write(this.instance.id, this.instance.leaseToken, { now, entries: uniqueEntries(batch) });
+        ok = await this.deps.store.write(this.instance.id, this.instance.leaseToken, { now, entries: uniqueEntries(batch), ...change });
       } catch (error) {
         this.storeError = error;
         this.abort.abort(new WorkflowInterrupt('store-error'));
@@ -984,6 +1030,7 @@ export class WorkflowExecution {
         this.loseLease();
         throw this.interrupt('lease-lost');
       }
+      this.statusWritten(change);
     } finally {
       done();
     }
@@ -1051,6 +1098,9 @@ function wakeTime(name: string, when: Duration | { until: Date | number }, now: 
 }
 
 const COMPENSATE = '$compensate:';
+
+/** The most a custom status (`ctx.setStatus()`) may take as JSON. */
+const MAX_CUSTOM_STATUS_BYTES = 16_384;
 
 const ADVICE =
   'A deployed change renamed, removed or reordered steps. Ship such changes as a new version ' +

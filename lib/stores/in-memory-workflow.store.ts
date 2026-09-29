@@ -101,6 +101,7 @@ export class InMemoryWorkflowStore implements WorkflowStore {
       cancelRequested: false,
       cancelReason: null,
       deadline: i.deadline,
+      customStatus: null,
       signalCursor: this.lastSignalId(),
       runs: 0,
       createdAt: i.now,
@@ -300,6 +301,9 @@ export class InMemoryWorkflowStore implements WorkflowStore {
     if (w.error !== undefined) {
       i.error = copy(w.error);
     }
+    if (w.customStatus !== undefined) {
+      i.customStatus = copy(w.customStatus);
+    }
 
     if (w.release) {
       const { waits, signalCursor } = w.release;
@@ -311,7 +315,7 @@ export class InMemoryWorkflowStore implements WorkflowStore {
       i.wakeAt = missed || (i.cancelRequested && w.status === 'suspended') ? w.now : w.release.wakeAt;
     }
 
-    if (w.status !== undefined || w.output !== undefined || w.error !== undefined || w.release) {
+    if (w.status !== undefined || w.output !== undefined || w.error !== undefined || w.customStatus !== undefined || w.release) {
       i.updatedAt = w.now;
     }
 

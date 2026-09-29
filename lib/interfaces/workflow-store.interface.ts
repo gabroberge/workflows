@@ -167,8 +167,8 @@ export interface NewWorkflowInstance {
   deadline: number | null;
   /**
    * `createdAt`, `updatedAt` and `wakeAt`. The new instance also gets `signalCursor` = the
-   * last signal id (signals sent after it started can match its waits), `runs: 0`, no lease
-   * and no cancel request.
+   * last signal id (signals sent after it started can match its waits), `runs: 0`, no lease,
+   * no cancel request and `customStatus: null`.
    */
   now: number;
 }
@@ -282,7 +282,8 @@ export interface WorkflowClaim {
  *    `WorkflowStore.signal()`), before anything else.
  * 2. Lock the instance row if its lease token is `token`; if not, write nothing, return `false`.
  * 3. Upsert `entries` by name.
- * 4. Set `status`, `output` and `error` when present (`undefined` leaves them as they are).
+ * 4. Set `status`, `output`, `error` and `customStatus` when present (`undefined` leaves them as
+ *    they are).
  * 5. With `release`: replace the instance's waits with `release.waits`, clear `leaseToken` and
  *    `leaseUntil` (keep `leaseOwner`), and set `wakeAt`: `now` if a signal with an id above
  *    `release.signalCursor` matches one of the new waits (name and exact key), or if the
@@ -302,6 +303,8 @@ export interface WorkflowWrite {
   status?: WorkflowStatus;
   output?: unknown;
   error?: SerializedWorkflowError | null;
+  /** The instance's `customStatus` (`null` clears it). */
+  customStatus?: unknown;
   /** Hand the instance back: parked (`suspended`), finished, or due again at once. */
   release?: WorkflowRelease;
 }

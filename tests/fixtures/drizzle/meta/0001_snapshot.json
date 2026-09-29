@@ -1,5 +1,5 @@
 {
-  "id": "36551e98-a762-4ece-aa28-930a924d3fb0",
+  "id": "6da3922f-9b06-4494-85e7-1a0b95e1cad0",
   "prevId": "aae1f06b-1318-499b-ae7a-26eaa6c95080",
   "version": "7",
   "dialect": "postgresql",
@@ -133,6 +133,12 @@
         "deadline": {
           "name": "deadline",
           "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "custom_status": {
+          "name": "custom_status",
+          "type": "jsonb",
           "primaryKey": false,
           "notNull": false
         },

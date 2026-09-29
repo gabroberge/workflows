@@ -80,6 +80,7 @@ export function workflowStoreContract(
         cancelRequested: false,
         cancelReason: null,
         deadline: null,
+        customStatus: null,
         signalCursor: 0,
         runs: 0,
         createdAt: 1_000,
@@ -248,6 +249,26 @@ export function workflowStoreContract(
     expect(await t.store.get('back'), { status: 'running', wakeAt: 5, leaseUntil: null, error: null }, 'handed back: due, status unchanged');
     absent((await t.store.get('back'))!.output, 'output, never set', { orNull: true });
     equal((await t.claim(5, { owner: 'w2', token: 't3' })).instances.map((i) => i.id), ['back'], 'claimable at once');
+  });
+
+  add('write() sets the custom status under the lease, and leaves it as it is when not given', async (t) => {
+    await t.create('a');
+    await t.claim(1, { token: 't' });
+
+    const status = { stage: 'packing', items: [{ sku: 'kibble-2kg', qty: 2 }], note: "it's 100% ü", none: null };
+    equal(await t.store.write('a', 't', { now: 2, entries: [], customStatus: status }), true, 'set');
+    expect(await t.store.get('a'), { customStatus: status, updatedAt: 2 }, 'the status');
+    await t.store.write('a', 't', { now: 3, entries: [entry('x')], status: 'running' });
+    expect(await t.store.get('a'), { customStatus: status }, 'a write without it leaves it');
+    await t.store.write('a', 't', { now: 4, entries: [], customStatus: 'shipped' });
+    expect((await t.store.list({ limit: 10, offset: 0 }))[0], { customStatus: 'shipped' }, 'a string, in list()');
+    await t.store.write('a', 't', { now: 5, entries: [], customStatus: 0 });
+    equal((await t.store.get('a'))!.customStatus, 0, 'a falsy value');
+    await t.store.write('a', 't', { now: 6, entries: [], customStatus: null, release: { wakeAt: 50, waits: [], signalCursor: 0 } });
+    equal((await t.store.get('a'))!.customStatus, null, 'cleared, with a release');
+
+    equal(await t.store.write('a', 't', { now: 7, entries: [], customStatus: 'stale' }), false, 'after the release');
+    equal((await t.store.get('a'))!.customStatus, null, 'not written under a stale token');
   });
 
   // ---------------------------------------------------------------- signals

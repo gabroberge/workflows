@@ -32,6 +32,7 @@ export const workflowInstances = pgTable(
     cancelRequested: boolean('cancel_requested').notNull().default(false),
     cancelReason: text('cancel_reason'),
     deadline: bigint('deadline', { mode: 'number' }),
+    customStatus: jsonb('custom_status'),
     signalCursor: bigint('signal_cursor', { mode: 'number' }).notNull(),
     runs: integer('runs').notNull().default(0),
     createdAt: bigint('created_at', { mode: 'number' }).notNull(),

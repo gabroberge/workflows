@@ -113,6 +113,15 @@ export interface WorkflowJournalLargeEvent extends WorkflowEventBase {
 }
 
 /**
+ * Channel `nestjs:workflows:custom-status`: the instance's custom status (`ctx.setStatus()`)
+ * changed, and was written.
+ */
+export interface WorkflowCustomStatusEvent extends WorkflowEventBase {
+  type: 'custom-status';
+  status: unknown;
+}
+
+/**
  * Channel `nestjs:workflows:workflow-retried`: an operator's `WorkflowClient.retry()` reopened a
  * `failed` instance (it runs again from its journal) or a `compensation_failed` one (its
  * compensations run again).
@@ -146,5 +155,6 @@ export type WorkflowEvent =
   | WorkflowSignalReceivedEvent
   | WorkflowSignalTimedOutEvent
   | WorkflowJournalLargeEvent
+  | WorkflowCustomStatusEvent
   | WorkflowRetriedEvent
   | WorkflowDeletedEvent;

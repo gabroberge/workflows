@@ -347,7 +347,7 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
       const { waits } = exec.suspension;
       // Parked no later than the run timeout, so a sleep or wait past it can't outlive it.
       const wakeAt = instance.deadline === null ? exec.suspension.wakeAt : Math.min(exec.suspension.wakeAt ?? instance.deadline, instance.deadline);
-      const ok = await this.write(instance, {
+      const ok = await this.write(exec, instance, {
         entries: exec.drainBuffer(),
         status: 'suspended',
         release: this.release(exec, wakeAt, waits),
@@ -391,7 +391,7 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
     alreadyCompensating: boolean,
   ): Promise<void> {
     if (!alreadyCompensating) {
-      const ok = await this.write(instance, { entries: exec.drainBuffer(), status: 'compensating', error: reason });
+      const ok = await this.write(exec, instance, { entries: exec.drainBuffer(), status: 'compensating', error: reason });
       if (!ok) {
         return this.leaseLostWarning(instance);
       }
@@ -407,7 +407,7 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
       case 'failed':
         return this.finish(exec, instance, 'compensation_failed', { error: { ...reason, compensation: result.error } });
       case 'suspended': {
-        const ok = await this.write(instance, {
+        const ok = await this.write(exec, instance, {
           entries: exec.drainBuffer(),
           status: 'compensating',
           release: this.release(exec, result.wakeAt, []),
@@ -448,7 +448,7 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
 
     if (exec.shuttingDown && !finished) {
       // Handed back: due at once, for another worker (or this one, after a restart).
-      await this.write(instance, {
+      await this.write(exec, instance, {
         entries: [...exec.drainBuffer(), ...exec.rollbacks],
         release: this.release(exec, this.clock.now(), []),
       });
@@ -469,7 +469,7 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
       entries.push(...exec.abandoned().map((entry) => ({ ...entry, updatedAt: this.clock.now() })));
     }
 
-    const ok = await this.write(instance, {
+    const ok = await this.write(exec, instance, {
       entries,
       status,
       output: result.output,
@@ -491,9 +491,14 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
     }
   }
 
-  /** A fenced write under the execution's lease, stamped with the clock. */
-  private write(instance: ClaimedWorkflowInstance, write: Omit<WorkflowWrite, 'now'>): Promise<boolean> {
-    return this.store.write(instance.id, instance.leaseToken, { ...write, entries: uniqueEntries(write.entries), now: this.clock.now() });
+  /** A fenced write under the execution's lease, stamped with the clock, with the custom status if it changed. */
+  private async write(exec: WorkflowExecution, instance: ClaimedWorkflowInstance, write: Omit<WorkflowWrite, 'now'>): Promise<boolean> {
+    const change = exec.statusChange();
+    const ok = await this.store.write(instance.id, instance.leaseToken, { ...write, ...change, entries: uniqueEntries(write.entries), now: this.clock.now() });
+    if (ok) {
+      exec.statusWritten(change);
+    }
+    return ok;
   }
 
   private release(exec: WorkflowExecution, wakeAt: number | null, waits: WorkflowRelease['waits']): WorkflowRelease {

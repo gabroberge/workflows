@@ -29,6 +29,12 @@ export interface WorkflowInstance {
    * `null` for none.
    */
   deadline: number | null;
+  /**
+   * What the workflow last set with `ctx.setStatus()` (JSON), or `null`. Written with the lease
+   * holder's writes, so it lags `setStatus()` until the instance's next journal write or
+   * suspension.
+   */
+  customStatus: unknown;
   /** Signals with an id above this one can match the instance's waits. */
   signalCursor: number;
   /** Number of executions (claims) so far. */

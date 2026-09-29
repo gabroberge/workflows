@@ -70,6 +70,7 @@ export {
   type WorkflowCompensatingEvent,
   type WorkflowCompensationFailedEvent,
   type WorkflowCompletedEvent,
+  type WorkflowCustomStatusEvent,
   type WorkflowDeletedEvent,
   type WorkflowEvent,
   type WorkflowFailedEvent,

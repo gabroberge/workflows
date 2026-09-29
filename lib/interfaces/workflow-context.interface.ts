@@ -137,6 +137,15 @@ export interface WorkflowContext {
    * shows in `getStatus(id, { journal: true })`.
    */
   commit(name: string): void;
+  /**
+   * Sets the instance's custom status, a JSON value of up to 16 KiB that the outside world
+   * reads as `WorkflowClient.getStatus(id).customStatus` (a progress report, the stage an
+   * order is in). It is written with the instance's next journal write, suspension or end,
+   * and emitted as a `custom-status` event then. Every execution replays `run()`, and with it
+   * the `setStatus()` calls, so the status needs no journal entry of its own and is never
+   * read back by the workflow. `undefined` clears it (`null`).
+   */
+  setStatus(status: unknown): void;
   /** Fail the instance on purpose. Compensations run (only those after a `commit()`). */
   fail(message: string): never;
 }
