@@ -31,7 +31,7 @@ import {
 } from './workflow-execution.service.js';
 import { WorkflowEvents } from '../events/workflow-events.service.js';
 import type { WorkflowEvent } from '../events/workflow-events.interface.js';
-import { WorkflowStorage } from '../storage/workflow.storage.js';
+import { ENGINE_STORE, WorkflowStorage } from '../storage/workflow.storage.js';
 import type {
   WorkflowRelease,
   WorkflowStore,
@@ -113,11 +113,11 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
 
     this.deps = {
       get store() {
-        return storage.source;
+        return storage[ENGINE_STORE];
       },
       resolve: (workflow, version) => registry.resolve(workflow, version),
       createChild: async (child) => {
-        const { instance, created } = await storage.source.create(child);
+        const { instance, created } = await storage[ENGINE_STORE].create(child);
         if (created) {
           this.kick();
         } else {
@@ -142,7 +142,7 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
 
   /** Read at each use, never in the constructor: sources register while providers are created. */
   private get store(): WorkflowStore {
-    return this.storage.source;
+    return this.storage[ENGINE_STORE];
   }
 
   async onModuleDestroy() {

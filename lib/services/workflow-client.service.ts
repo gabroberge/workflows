@@ -13,7 +13,7 @@ import { WorkflowResultTimeoutError } from '../errors/workflow-result-timeout.er
 import { normalize } from '../utils/normalize.util.js';
 import { assertSameInstance, newInstance } from '../utils/new-instance.util.js';
 import { signalName, type WorkflowSignal } from '../signals/workflow.signal.js';
-import { WorkflowStorage } from '../storage/workflow.storage.js';
+import { ENGINE_STORE, WorkflowStorage } from '../storage/workflow.storage.js';
 import { stepSignalId, stepStartId } from '../utils/step-scope.util.js';
 import type { WorkflowInstanceDetails, WorkflowPurgeResult, WorkflowStore } from '../interfaces/workflow-store.interface.js';
 import { WorkflowRegistry } from './workflow-registry.service.js';
@@ -58,7 +58,7 @@ export class WorkflowClient {
 
   /** Read at each call, never in the constructor: sources register while providers are created. */
   private get store(): WorkflowStore {
-    return this.storage.source;
+    return this.storage[ENGINE_STORE];
   }
 
   /**
@@ -483,7 +483,7 @@ export class WorkflowClient {
     if (typeof fn !== 'function') {
       throw new TypeError(
         `${caller}() with { transaction } needs a WorkflowStore on your database that implements ${method}(); ` +
-          `${store.constructor.name} has none. See https://docs.nestjs.com/reliability/workflows#the-store-contract.`,
+          `${this.storage.source.constructor.name} has none. See https://docs.nestjs.com/reliability/workflows#the-store-contract.`,
       );
     }
 

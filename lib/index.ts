@@ -141,6 +141,10 @@ export type {
 } from './interfaces/index.js';
 export * from './stores/index.js';
 
+// Payloads: encode (encrypt, compress) what the store keeps, with `WorkflowsModule.forRoot({ codec })`
+export { AesGcmPayloadCodec, type AesGcmPayloadCodecOptions } from './codecs/index.js';
+export type { WorkflowPayloadCodec, WorkflowPayloadContext } from './interfaces/index.js';
+
 // Testing: a clock that only moves when told to, and `WorkflowWorker.drain()` to run due
 // instances now (with the contract suite in `@nestjs/workflows/testing`)
 export { ManualWorkflowClock } from './utils/index.js';

@@ -450,7 +450,7 @@ export interface WorkflowScheduleRecord {
   declared: boolean;
   /** The engine's JSON: when it runs and how. Store it as it is. */
   spec: unknown;
-  /** The input of the instances it starts (JSON), or `null`. */
+  /** The input of the instances it starts (JSON: a string with a codec), or `null`. */
   input: unknown;
   paused: boolean;
   /** When a worker next has something to do for it (`claimSchedules()` looks for `wakeAt <= now`), or `null`. */

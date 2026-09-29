@@ -1,12 +1,18 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { InMemoryWorkflowStore } from '../stores/in-memory-workflow.store.js';
+import type { WorkflowPayloadCodec } from '../interfaces/workflow-payload-codec.interface.js';
 import type { WorkflowStore } from '../interfaces/workflow-store.interface.js';
 import { WORKFLOWS_MODULE_OPTIONS } from '../workflows.module-definition.js';
+import { WORKFLOW_PAYLOAD_CODECS } from '../workflows.constants.js';
+import { EncodedWorkflowStore, PayloadCodecs } from './encoded-workflow.store.js';
 import type { WorkflowsModuleOptions } from '../interfaces/workflows-module-options.interface.js';
 import type { WorkflowStorageRegisterOptions } from '../interfaces/workflow-storage.interface.js';
 
 /** Internal: locks the registry. `WorkflowsModule.onModuleInit()` and the first read call it. */
 export const LOCK_STORAGE = Symbol('WorkflowStorage.lock');
+
+/** Internal: the store the engine uses, `source` with the module's codecs applied to the payloads. */
+export const ENGINE_STORE = Symbol('WorkflowStorage.engineStore');
 
 const REQUIRED = [
   'create',
@@ -56,8 +62,15 @@ export class WorkflowStorage {
   private readonly logger = new Logger('WorkflowsModule');
   private registered?: WorkflowStore;
   private active?: WorkflowStore;
+  private engine?: WorkflowStore;
+  private readonly codecs: PayloadCodecs;
 
-  constructor(@Optional() @Inject(WORKFLOWS_MODULE_OPTIONS) private readonly options?: WorkflowsModuleOptions) {}
+  constructor(
+    @Optional() @Inject(WORKFLOWS_MODULE_OPTIONS) private readonly options?: WorkflowsModuleOptions,
+    @Optional() @Inject(WORKFLOW_PAYLOAD_CODECS) codecs?: WorkflowPayloadCodec[],
+  ) {
+    this.codecs = new PayloadCodecs(codecs ?? []);
+  }
 
   /**
    * Makes `source` the store. Call it from the constructor of a singleton provider. Throws
@@ -93,6 +106,11 @@ export class WorkflowStorage {
       this[LOCK_STORAGE]();
     }
     return this.active!;
+  }
+
+  /** @internal `source`, as the engine uses it: payloads encoded with the module's codecs on the way in, and decoded on the way out. */
+  get [ENGINE_STORE](): WorkflowStore {
+    return (this.engine ??= new EncodedWorkflowStore(this.source, this.codecs));
   }
 
   /** Fixes the source, logs it, and enforces the production guard (which leaves the registry open). */

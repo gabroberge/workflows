@@ -4,6 +4,7 @@ export * from './workflow-clock.interface.js';
 export * from './workflow-context.interface.js';
 export * from './workflow-decorator-options.interface.js';
 export * from './workflow-instance.interface.js';
+export * from './workflow-payload-codec.interface.js';
 export * from './workflow-retry-options.interface.js';
 export * from './workflow-runner.interface.js';
 export * from './workflow-schedule.interface.js';

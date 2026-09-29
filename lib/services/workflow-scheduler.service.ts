@@ -8,7 +8,7 @@ import type { WorkflowInstance, WorkflowStatus } from '../interfaces/workflow-in
 import type { WorkflowSchedule } from '../interfaces/workflow-schedule.interface.js';
 import type { WorkflowScheduleRecord, WorkflowScheduleSave, WorkflowStore } from '../interfaces/workflow-store.interface.js';
 import type { WorkflowsModuleOptions } from '../interfaces/workflows-module-options.interface.js';
-import { WorkflowStorage } from '../storage/workflow.storage.js';
+import { ENGINE_STORE, WorkflowStorage } from '../storage/workflow.storage.js';
 import { canonical } from '../utils/canonical.util.js';
 import { systemClock } from '../utils/clock.util.js';
 import { newInstance } from '../utils/new-instance.util.js';
@@ -76,7 +76,7 @@ export class WorkflowScheduler implements OnApplicationBootstrap {
 
   /** Read at each call, never in the constructor: sources register while providers are created. */
   private get store(): WorkflowStore {
-    return this.storage.source;
+    return this.storage[ENGINE_STORE];
   }
 
   async onApplicationBootstrap(): Promise<void> {

@@ -1,4 +1,5 @@
-import type { ConfigurableModuleAsyncOptions } from '@nestjs/common';
+import type { ConfigurableModuleAsyncOptions, Type } from '@nestjs/common';
+import type { WorkflowPayloadCodec } from './workflow-payload-codec.interface.js';
 import type { WorkflowClock } from './workflow-clock.interface.js';
 import type { Duration } from '../utils/duration.util.js';
 import type { WorkflowRetryOptions } from './workflow-retry-options.interface.js';
@@ -62,6 +63,14 @@ export interface WorkflowsModuleOptions {
    * anyway (a demo, a single-process tool whose workflows may be lost).
    */
   allowInMemoryStorage?: boolean;
+  /**
+   * Encodes what workflows store for you before the store sees it (inputs, outputs, step results, checkpoints,
+   * signal payloads, custom statuses, schedule inputs, errors' messages), to encrypt it: an `AesGcmPayloadCodec`,
+   * your own `WorkflowPayloadCodec`, or its class (Nest creates it, with dependencies from this module's
+   * `imports` and from global modules). Several: the first encodes, and each keeps decoding what it encoded, so
+   * list the one you replace after the new one. Payloads stored before a codec was set are read as they are.
+   */
+  codec?: WorkflowPayloadCodec | Type<WorkflowPayloadCodec> | Array<WorkflowPayloadCodec | Type<WorkflowPayloadCodec>>;
 }
 
 /** Implemented by a `forRootAsync({ useClass })` class: Nest calls `createWorkflowsOptions()`. */

@@ -12,7 +12,7 @@ import type {
 } from '../interfaces/workflow-schedule.interface.js';
 import type { WorkflowScheduleRecord, WorkflowStore } from '../interfaces/workflow-store.interface.js';
 import type { WorkflowsModuleOptions } from '../interfaces/workflows-module-options.interface.js';
-import { WorkflowStorage } from '../storage/workflow.storage.js';
+import { ENGINE_STORE, WorkflowStorage } from '../storage/workflow.storage.js';
 import { systemClock } from '../utils/clock.util.js';
 import { normalize } from '../utils/normalize.util.js';
 import { nextOccurrence, occurrences, previewSpec, SCHEDULE_ID, scheduleSpec, type ScheduleSpec } from '../utils/schedule-spec.util.js';
@@ -42,7 +42,7 @@ export class WorkflowSchedules {
 
   /** Read at each call, never in the constructor: sources register while providers are created. */
   private get store(): WorkflowStore {
-    return this.storage.source;
+    return this.storage[ENGINE_STORE];
   }
 
   /**
