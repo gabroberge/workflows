@@ -244,17 +244,23 @@ export class EncodedWorkflowStore implements WorkflowStore {
 
   async claim(request: WorkflowClaimRequest): Promise<WorkflowClaim> {
     const claim = await this.inner.claim(request);
-    const instances = await this.readable(claim.instances, (instance) => this.decodeInstance(instance), 'Instance', async (instance) => {
-      // Handed back at once, with its waits, due when its lease would have ended: its concurrency slot is free now,
-      // and the instances due before then go first, instead of this one taking the slot at every claim.
-      const waits = (await this.inner.get(instance.id))?.waits ?? [];
-      await this.inner.write(instance.id, request.token, {
-        now: request.now,
-        entries: [],
-        release: { wakeAt: request.leaseUntil, waits, signalCursor: claim.lastSignalId },
-      });
-    });
+    const instances = await this.readable(claim.instances, (instance) => this.decodeInstance(instance), 'Instance', (instance) =>
+      this.handBack(instance.id, request.token, { now: request.now, leaseUntil: request.leaseUntil, signalCursor: claim.lastSignalId }),
+    );
     return { ...claim, instances };
+  }
+
+  /**
+   * Hands a leased instance back untouched, with its waits, due when its lease would have ended: its concurrency slot
+   * is free at once, and the instances due before then go first, instead of this one taking the slot at every claim.
+   */
+  async handBack(id: string, token: string, lease: { now: number; leaseUntil: number; signalCursor: number }): Promise<void> {
+    const waits = (await this.inner.get(id))?.waits ?? [];
+    await this.inner.write(id, token, {
+      now: lease.now,
+      entries: [],
+      release: { wakeAt: lease.leaseUntil, waits, signalCursor: lease.signalCursor },
+    });
   }
 
   renew(id: string, token: string, leaseUntil: number) {

@@ -33,6 +33,7 @@ import { WorkflowEvents } from '../events/workflow-events.service.js';
 import type { WorkflowEvent } from '../events/workflow-events.interface.js';
 import { ENGINE_STORE, WorkflowStorage } from '../storage/workflow.storage.js';
 import type {
+  WorkflowInstanceDetails,
   WorkflowRelease,
   WorkflowStore,
   WorkflowWrite,
@@ -332,9 +333,9 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
     running.stopHeartbeat = () => clearInterval(heartbeat);
 
     try {
-      const details = await this.store.get(instance.id, { journal: true });
+      const details = await this.claimed(instance, signalCursor);
       if (!details) {
-        throw new Error(`The store has no instance "${instance.id}", which it just leased.`);
+        return;
       }
 
       const replayOnly = instance.status === 'compensating' || instance.cancelRequested;
@@ -359,6 +360,30 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
     } finally {
       clearInterval(heartbeat);
     }
+  }
+
+  /**
+   * The claimed instance with its journal, or `null` when that can't be read (a codec whose key is gone wrote part of
+   * the journal, as after a key rotation that was rolled back): then it is handed back, as a claim hands back an
+   * instance whose own payloads can't be read, instead of holding its lease and its concurrency slot until the lease
+   * expires, and going first at every claim after that.
+   */
+  private async claimed(instance: ClaimedWorkflowInstance, signalCursor: number): Promise<WorkflowInstanceDetails | null> {
+    let details: WorkflowInstanceDetails | null;
+    try {
+      details = await this.store.get(instance.id, { journal: true });
+    } catch (error) {
+      this.logger.error(`Instance "${instance.id}" can't be read, so it isn't run; it is claimed again later.`, error as Error);
+      const lease = { now: this.clock.now(), leaseUntil: instance.leaseUntil!, signalCursor };
+      // At worst its lease expires, as if its worker had died.
+      await this.storage[ENGINE_STORE].handBack(instance.id, instance.leaseToken, lease).catch(() => undefined);
+      return null;
+    }
+
+    if (!details) {
+      throw new Error(`The store has no instance "${instance.id}", which it just leased.`);
+    }
+    return details;
   }
 
   private async conclude(exec: WorkflowExecution, instance: ClaimedWorkflowInstance, outcome: RunOutcome): Promise<void> {

@@ -149,6 +149,14 @@ class OneAtATime {
   }
 }
 
+@Workflow('one-review-at-a-time', { concurrency: { limit: 1 } })
+class OneReviewAtATime {
+  async run(ctx: WorkflowContext, input: { orderId: string }) {
+    const approval = await ctx.waitForSignal('approval', approved, { key: input.orderId });
+    return approval!.by;
+  }
+}
+
 /** Echoes a signal, or fails with it: strings that look like envelopes, from its caller and from whoever signals it. */
 @Workflow('echo')
 class EchoWorkflow {
@@ -452,6 +460,32 @@ describe('a codec', () => {
     }
     expect(await node.client.getStatus('readable')).toMatchObject({ status: 'completed' });
     expect(world.calls.map((call) => call.key)).toEqual(['readable']);
+  });
+
+  it("hands back at once an instance whose journal it can't read, which holds no concurrency slot meanwhile", async () => {
+    let node = await start(aes(), [OneReviewAtATime]);
+    await node.client.start(OneReviewAtATime, { orderId: 'o-1' }, { id: 'journal-unreadable' });
+    await nodes.pop()!.close();
+    // A key rotation, rolled back: the instance parked under the new key, its row still under the old one.
+    node = await start(aes({ k1: KEY_1, k2: KEY_2 }, 'k2'), [OneReviewAtATime]);
+    await node.worker.drain();
+    await nodes.pop()!.close();
+
+    const error = vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    node = await start(aes(), [OneReviewAtATime]);
+    clock.advance('1s');
+    await node.client.signal(approved, { by: 'agent-7', note: 'ok' }, { key: 'o-1' });
+    await node.client.start(OneReviewAtATime, { orderId: 'o-2' }, { id: 'readable' });
+    await node.client.signal(approved, { by: 'agent-8', note: 'ok' }, { key: 'o-2' });
+    await node.worker.drain();
+
+    expect(await node.client.getStatus('readable')).toMatchObject({ status: 'completed', output: 'agent-8' });
+    expect(await node.store.get('journal-unreadable')).toMatchObject({
+      leaseUntil: null,
+      wakeAt: clock.now() + 30_000,
+      waits: [{ signal: 'refund.approved', key: 'o-1' }],
+    });
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('Instance "journal-unreadable" can\'t be read, so it isn\'t run'), expect.anything());
   });
 
   it('is created with its dependencies when given as a class, and validated at startup', async () => {
