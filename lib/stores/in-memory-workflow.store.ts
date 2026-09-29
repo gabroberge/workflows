@@ -94,6 +94,7 @@ export class InMemoryWorkflowStore implements WorkflowStore {
       version: i.version,
       parentId: i.parentId ?? null,
       parentClose: i.parentClose ?? null,
+      concurrencyKey: i.concurrencyKey ?? null,
       status: 'pending',
       input: copy(i.input),
       output: undefined,
@@ -256,7 +257,7 @@ export class InMemoryWorkflowStore implements WorkflowStore {
 
   async claim(request: WorkflowClaimRequest): Promise<WorkflowClaim> {
     const runs = new Set(request.workflows.map((w) => `${w.version}:${w.name}`));
-    const due = [...this.rows.values()]
+    const candidates = [...this.rows.values()]
       .filter(
         ({ instance: i }) =>
           RUNNABLE.has(i.status) &&
@@ -265,8 +266,18 @@ export class InMemoryWorkflowStore implements WorkflowStore {
           (i.leaseUntil === null || i.leaseUntil < request.now) &&
           runs.has(`${i.version}:${i.workflow}`),
       )
-      .sort((a, b) => a.instance.wakeAt! - b.instance.wakeAt! || a.instance.createdAt - b.instance.createdAt || compare(a.instance.id, b.instance.id))
-      .slice(0, request.limit);
+      .sort((a, b) => a.instance.wakeAt! - b.instance.wakeAt! || a.instance.createdAt - b.instance.createdAt || compare(a.instance.id, b.instance.id));
+
+    const slots = this.slots(request);
+    const due: Row[] = [];
+    for (const row of candidates) {
+      if (due.length === request.limit) {
+        break;
+      }
+      if (slots.take(row.instance)) {
+        due.push(row);
+      }
+    }
 
     for (const row of due) {
       const i = row.instance;
@@ -281,6 +292,35 @@ export class InMemoryWorkflowStore implements WorkflowStore {
     }
 
     return { instances: due.map((row) => copy(row.instance)), lastSignalId: this.lastSignalId() };
+  }
+
+  /** Counts the slots of `request.limits` that live leases hold; `take()` claims one if the instance's limits have room. */
+  private slots(request: WorkflowClaimRequest): { take(instance: WorkflowInstance): boolean } {
+    const limits = new Map((request.limits ?? []).map((limit) => [limit.workflow, limit]));
+    const held = new Map<string, number>();
+    const count = (key: string) => held.set(key, (held.get(key) ?? 0) + 1);
+    const keys = (i: WorkflowInstance) => [JSON.stringify([i.workflow]), ...(i.concurrencyKey === null ? [] : [JSON.stringify([i.workflow, i.concurrencyKey])])];
+    for (const { instance: i } of this.rows.values()) {
+      if (limits.has(i.workflow) && i.leaseUntil !== null && i.leaseUntil >= request.now) {
+        keys(i).forEach(count);
+      }
+    }
+
+    return {
+      take: (i) => {
+        const limit = limits.get(i.workflow);
+        if (!limit) {
+          return true;
+        }
+
+        const [workflow, key] = keys(i);
+        if ((limit.limit !== null && (held.get(workflow!) ?? 0) >= limit.limit) || (limit.perKey !== null && key !== undefined && (held.get(key) ?? 0) >= limit.perKey)) {
+          return false;
+        }
+        keys(i).forEach(count);
+        return true;
+      },
+    };
   }
 
   async renew(id: string, token: string, leaseUntil: number): Promise<{ cancelRequested: boolean; terminateRequested: boolean } | null> {

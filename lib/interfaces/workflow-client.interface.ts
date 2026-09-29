@@ -25,6 +25,11 @@ export interface StartWorkflowOptions {
    */
   timeout?: Duration;
   /**
+   * The key the workflow's per-key concurrency limit counts the instance under, instead of the
+   * one its `concurrency.key` computes. Needs a limit with a `key`.
+   */
+  concurrencyKey?: string;
+  /**
    * Your ORM's transaction: the `tx` (or `EntityManager`, `Transaction`...) your transaction
    * callback receives. The instance is created in it, so it exists if and only if your
    * transaction commits, together with the rows you wrote. The worker picks it up after the

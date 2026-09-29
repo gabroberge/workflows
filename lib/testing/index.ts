@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { WorkflowJournalEntry } from '../interfaces/workflow-instance.interface.js';
-import type { WorkflowClaim, WorkflowStore, WorkflowWrite } from '../interfaces/workflow-store.interface.js';
+import type { WorkflowClaim, WorkflowConcurrencyLimit, WorkflowStore, WorkflowWrite } from '../interfaces/workflow-store.interface.js';
 
 export interface WorkflowStoreContractOptions {
   /**
@@ -73,6 +73,7 @@ export function workflowStoreContract(
         version: 3,
         parentId: null,
         parentClose: null,
+        concurrencyKey: null,
         status: 'pending',
         input,
         error: null,
@@ -170,6 +171,48 @@ export function workflowStoreContract(
     const v2 = await t.claim(2_000, { owner: 'w3', limit: 1, workflows: [{ name: 'order-fulfilment', version: 2 }, { name: 'invoice-batch', version: 1 }] });
     equal(v2.instances.map((i) => i.id), ['v2'], 'only the versions the worker runs');
     equal((await t.claim(6_000, { owner: 'w4', limit: 1 })).instances.map((i) => i.id), ['early'], 'at most limit');
+  });
+
+  add("claim() under a workflow's limit leases no more than it allows, counting the leases still live", async (t) => {
+    for (const [i, id] of ['a', 'b', 'c', 'd'].entries()) {
+      await t.keyed(id, null, i);
+    }
+    await t.create('x', 0, 'invoice-batch');
+    const limits = [{ workflow: W.name, limit: 2, perKey: null }];
+    const claim = (now: number, token: string) =>
+      t.claim(now, { token, limits, leaseUntil: now + 100, workflows: [W, { name: 'invoice-batch', version: 1 }] });
+
+    equal((await claim(10, 't1')).instances.map((i) => i.id), ['a', 'x', 'b'], 'two of the limited workflow, and the unlimited one');
+    equal((await claim(20, 't2')).instances.map((i) => i.id), [], 'both slots held');
+    equal(await t.release('a', 't1'), true, "a's lease ends");
+    equal((await claim(30, 't3')).instances.map((i) => i.id), ['c'], 'the slot it freed');
+    // b's lease (until 110) expired: b is due again, holds no slot, and goes before d. So is x's.
+    equal((await claim(111, 't4')).instances.map((i) => [i.id, i.runs]), [['x', 2], ['b', 2]], 'the slot an expired lease freed');
+    equal((await t.claim(111, { token: 't5' })).instances.map((i) => i.id), ['d'], 'a claim without limits');
+  });
+
+  add('claim() keeps at most perKey of a key leased, passes over a full key, and takes each key in order', async (t) => {
+    await t.keyed('c1-a', 'customer-1', 0);
+    await t.keyed('c1-b', 'customer-1', 1);
+    await t.keyed('c2-a', 'customer-2', 2);
+    await t.keyed('none', null, 3);
+    await t.keyed('c1-c', 'customer-1', 4);
+    await t.keyed('c3-a', 'customer-3', 5);
+    expect(await t.store.get('c1-a'), { concurrencyKey: 'customer-1' }, 'the key, stored');
+    const perKey = [{ workflow: W.name, limit: null, perKey: 1 }];
+
+    equal((await t.claim(10, { token: 't1', limits: perKey, limit: 3 })).instances.map((i) => i.id), ['c1-a', 'c2-a', 'none'], 'one per key, and one without a key');
+    equal((await t.claim(10, { token: 't2', limits: perKey })).instances.map((i) => i.id), ['c3-a'], 'the next free key');
+    equal((await t.claim(10, { token: 't3', limits: perKey })).instances.map((i) => i.id), [], 'every key full');
+    await t.release('c1-a', 't1');
+    equal((await t.claim(10, { token: 't4', limits: perKey })).instances.map((i) => i.id), ['c1-b'], "the key's next, not its last");
+
+    // Both limits: the workflow's counts every key's.
+    const both = [{ workflow: W.name, limit: 5, perKey: 1 }];
+    await t.keyed('c4-a', 'customer-4', 6);
+    await t.keyed('c5-a', 'customer-5', 7);
+    equal((await t.claim(10, { token: 't5', limits: both })).instances.map((i) => i.id), ['c4-a'], 'the fifth slot');
+    equal((await t.claim(10, { token: 't6', limits: both })).instances.map((i) => i.id), [], 'the workflow full');
   });
 
   add('claim() keeps a compensating instance compensating, and never claims a finished one', async (t) => {
@@ -710,6 +753,32 @@ export function workflowStoreContract(
       equal(all.filter((i) => i.runs !== 1 || i.leaseOwner !== owners.get(i.id)).map((i) => i.id), [], 'each claimed once, by its owner');
     });
 
+    add('concurrent claims never lease more than a limit allows, and fill every free slot', async (t) => {
+      for (let i = 0; i < 60; i++) {
+        await t.keyed(`k${i % 6}-${String(i).padStart(2, '0')}`, `k${i % 6}`, i);
+      }
+
+      const limits = [{ workflow: W.name, limit: 4, perKey: 1 }];
+      const tokens = new Map<string, string>();
+      for (let round = 0; round < 5; round++) {
+        const now = 1_000 + round;
+        await Promise.all(
+          ['c1', 'c2', 'c3', 'c4', 'c5', 'c6'].map(async (owner) => {
+            await jitter();
+            const token = randomUUID();
+            for (const instance of (await t.claim(now, { owner, token, limit: 3, leaseUntil: FAR, limits })).instances) {
+              tokens.set(instance.id, token);
+            }
+          }),
+        );
+
+        const leased = (await t.store.list({ limit: 100, offset: 0 })).filter((i) => i.leaseUntil !== null && i.leaseUntil >= now);
+        equal(leased.length, 4, `round ${round}: every slot filled, none more`);
+        equal(new Set(leased.map((i) => i.concurrencyKey)).size, 4, `round ${round}: one per key`);
+        await Promise.all(leased.map((i) => jitter().then(() => t.store.write(i.id, tokens.get(i.id)!, { now, entries: [], status: 'completed', error: null, release: { wakeAt: null, waits: [], signalCursor: 0 } }))));
+      }
+    });
+
     add('a signal racing a suspension never loses the wake-up', async (t) => {
       const n = 60;
       for (let i = 0; i < n; i++) {
@@ -996,7 +1065,14 @@ class Harness {
 
   claim(
     now: number,
-    o: { owner?: string; token?: string; limit?: number; leaseUntil?: number; workflows?: Array<{ name: string; version: number }> } = {},
+    o: {
+      owner?: string;
+      token?: string;
+      limit?: number;
+      leaseUntil?: number;
+      workflows?: Array<{ name: string; version: number }>;
+      limits?: WorkflowConcurrencyLimit[];
+    } = {},
   ): Promise<WorkflowClaim> {
     return this.store.claim({
       owner: o.owner ?? 'w1',
@@ -1005,7 +1081,18 @@ class Harness {
       leaseUntil: o.leaseUntil ?? now + 1_000,
       limit: o.limit ?? 100,
       workflows: o.workflows ?? [W],
+      ...(o.limits ? { limits: o.limits } : {}),
     });
+  }
+
+  /** An instance of `W` with a concurrency key. */
+  keyed(id: string, key: string | null, now: number, workflow = W.name) {
+    return this.store.create({ id, workflow, version: 1, input: { id }, deadline: null, concurrencyKey: key, now });
+  }
+
+  /** Ends a lease: the instance is parked, and holds no slot. */
+  release(id: string, token: string) {
+    return this.store.write(id, token, { now: 1, entries: [], status: 'suspended', release: { wakeAt: FAR, waits: [], signalCursor: 0 } });
   }
 
   journalWrite(entries: WorkflowJournalEntry[]): WorkflowWrite {

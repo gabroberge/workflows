@@ -1,5 +1,5 @@
 {
-  "id": "7f69352c-b3f5-49ec-93bc-c22f3d7c70da",
+  "id": "127eaaca-38eb-4d32-ae9f-89bcf0873233",
   "prevId": "aae1f06b-1318-499b-ae7a-26eaa6c95080",
   "version": "7",
   "dialect": "postgresql",
@@ -77,6 +77,12 @@
         },
         "parent_close": {
           "name": "parent_close",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "concurrency_key": {
+          "name": "concurrency_key",
           "type": "text",
           "primaryKey": false,
           "notNull": false
@@ -242,6 +248,28 @@
             }
           ],
           "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "workflow_instances_leased": {
+          "name": "workflow_instances_leased",
+          "columns": [
+            {
+              "expression": "workflow",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "concurrency_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"workflow_instances\".\"lease_until\" IS NOT NULL",
           "concurrently": false,
           "method": "btree",
           "with": {}

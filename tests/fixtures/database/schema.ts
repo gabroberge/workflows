@@ -24,6 +24,8 @@ export const workflowInstances = pgTable(
     /** The instance that started this one with ctx.startChild(). */
     parentId: text('parent_id'),
     parentClose: text('parent_close').$type<WorkflowParentClose>(),
+    /** The key its workflow's per-key concurrency limit counts it under. */
+    concurrencyKey: text('concurrency_key'),
     status: text('status').$type<WorkflowStatus>().notNull(),
     input: jsonb('input'),
     output: jsonb('output'),
@@ -48,6 +50,8 @@ export const workflowInstances = pgTable(
     index('workflow_instances_created').on(t.createdAt, t.id),
     // What purges and list() by status look for.
     index('workflow_instances_status').on(t.status, t.updatedAt),
+    // What a claim counts for a concurrency limit: live leases, by workflow and key.
+    index('workflow_instances_leased').on(t.workflow, t.concurrencyKey).where(sql`${t.leaseUntil} IS NOT NULL`),
     // What list({ parentId }) and closing a parent's children look for.
     index('workflow_instances_parent').on(t.parentId, t.createdAt).where(sql`${t.parentId} IS NOT NULL`),
   ],

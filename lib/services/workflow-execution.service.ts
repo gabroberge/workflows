@@ -600,6 +600,7 @@ export class WorkflowExecution {
       caller: 'startChild()',
       now: this.deps.clock.now(),
       timeout: options.timeout,
+      concurrencyKey: options.concurrencyKey,
       parentId: this.instance.id,
       parentClose,
     });

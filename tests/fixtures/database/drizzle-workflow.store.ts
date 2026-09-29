@@ -21,7 +21,7 @@ import {
   type WorkflowStore,
   type WorkflowWrite,
 } from '../../../lib/index.js';
-import { and, asc, eq, gt, inArray, isNotNull, isNull, lt, lte, max, or, sql, type Column, type SQL } from 'drizzle-orm';
+import { and, asc, eq, gt, inArray, isNotNull, isNull, lt, lte, max, or, sql, type Column, type SQL, type SQLWrapper } from 'drizzle-orm';
 import { PgTransaction } from 'drizzle-orm/pg-core';
 import type { Database, Transaction } from './drizzle.js';
 import { workflowInstances as instances, workflowJournal as journal, workflowSignals as signals, workflowWaits as waits } from './schema.js';
@@ -201,24 +201,90 @@ export class DrizzleWorkflowStore implements WorkflowStore {
 
   async claim(request: WorkflowClaimRequest): Promise<WorkflowClaim> {
     const { now } = request;
-    // Due, unleased instances of the versions this worker runs, locked; rows another claim is
-    // locking right now are skipped instead of waited for.
+    // Due, unleased instances of the versions this worker runs.
+    const isDue = and(
+      isNotNull(instances.wakeAt),
+      lte(instances.wakeAt, now),
+      inArray(instances.status, RUNNABLE),
+      or(isNull(instances.leaseUntil), lt(instances.leaseUntil, now)),
+      or(...request.workflows.map((w) => and(eq(instances.workflow, w.name), eq(instances.version, w.version)))),
+    );
+    if (request.limits?.length) {
+      return this.db.transaction((tx) => this.claimWithin(tx, request, isDue!), READ_COMMITTED);
+    }
+
+    // Locked; rows another claim is locking right now are skipped instead of waited for.
     const due = this.db
       .select({ id: instances.id })
       .from(instances)
-      .where(
-        and(
-          isNotNull(instances.wakeAt),
-          lte(instances.wakeAt, now),
-          inArray(instances.status, RUNNABLE),
-          or(isNull(instances.leaseUntil), lt(instances.leaseUntil, now)),
-          or(...request.workflows.map((w) => and(eq(instances.workflow, w.name), eq(instances.version, w.version)))),
-        ),
-      )
+      .where(isDue)
       .orderBy(asc(instances.wakeAt), asc(instances.createdAt), asc(instances.id))
       .limit(request.limit)
       .for('update', { skipLocked: true });
-    const claimed = await this.db
+    return { instances: await this.lease(this.db, request, due), lastSignalId: await this.lastSignalId(this.db) };
+  }
+
+  /**
+   * A claim under concurrency limits. Claims of a limited workflow take its lock first (in name
+   * order, so two claims never wait for each other's), so they count the slots live leases hold
+   * and lease the instances that fit one after the other: two never both take the last slot.
+   */
+  private async claimWithin(tx: Transaction, request: WorkflowClaimRequest, isDue: SQL): Promise<WorkflowClaim> {
+    const limits = request.limits!;
+    for (const workflow of [...new Set(limits.map((limit) => limit.workflow))].sort()) {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`@nestjs/workflows:concurrency:${workflow}`}))`);
+    }
+
+    // Each key's candidates in order, as many as its free slots; then each workflow's, of those,
+    // as many as its free slots. A full key is passed over, not waited behind.
+    const { now } = request;
+    const { rows } = await tx.execute<{ id: string }>(sql`
+      WITH limits AS (
+        SELECT * FROM jsonb_to_recordset(${JSON.stringify(limits.map((l) => ({ workflow: l.workflow, total: l.limit, per_key: l.perKey })))}::jsonb)
+          AS l(workflow text, total int, per_key int)
+      ),
+      held AS (
+        SELECT ${instances.workflow} AS workflow, ${instances.concurrencyKey} AS key, count(*)::int AS n
+        FROM ${instances}
+        WHERE ${instances.leaseUntil} >= ${now} AND ${instances.workflow} IN (SELECT workflow FROM limits)
+        GROUP BY 1, 2
+      ),
+      due AS (
+        SELECT ${instances.id} AS id, ${instances.workflow} AS workflow, ${instances.concurrencyKey} AS key,
+          ${instances.wakeAt} AS wake_at, ${instances.createdAt} AS created_at,
+          row_number() OVER (PARTITION BY ${instances.workflow}, ${instances.concurrencyKey} ORDER BY ${instances.wakeAt}, ${instances.createdAt}, ${instances.id}) AS key_rank
+        FROM ${instances}
+        WHERE ${isDue}
+      ),
+      fits_key AS (
+        SELECT d.*, row_number() OVER (PARTITION BY d.workflow ORDER BY d.wake_at, d.created_at, d.id) AS workflow_rank
+        FROM due d
+        LEFT JOIN limits l ON l.workflow = d.workflow
+        WHERE l.per_key IS NULL OR d.key IS NULL
+          OR d.key_rank <= l.per_key - coalesce((SELECT n FROM held h WHERE h.workflow = d.workflow AND h.key = d.key), 0)
+      )
+      SELECT f.id FROM fits_key f
+      LEFT JOIN limits l ON l.workflow = f.workflow
+      WHERE l.total IS NULL OR f.workflow_rank <= l.total - coalesce((SELECT sum(n)::int FROM held h WHERE h.workflow = f.workflow), 0)
+      ORDER BY f.wake_at, f.created_at, f.id
+      LIMIT ${request.limit}
+    `);
+    if (rows.length === 0) {
+      return { instances: [], lastSignalId: await this.lastSignalId(tx) };
+    }
+
+    const due = tx
+      .select({ id: instances.id })
+      .from(instances)
+      .where(and(inArray(instances.id, rows.map((row) => row.id)), isDue))
+      .for('update', { skipLocked: true });
+    return { instances: await this.lease(tx, request, due), lastSignalId: await this.lastSignalId(tx) };
+  }
+
+  /** Leases the instances `due` selects (and locks). */
+  private async lease(db: Database | Transaction, request: WorkflowClaimRequest, due: SQLWrapper): Promise<WorkflowInstance[]> {
+    const { now } = request;
+    const claimed = await db
       .update(instances)
       .set({
         leaseToken: request.token,
@@ -231,7 +297,7 @@ export class DrizzleWorkflowStore implements WorkflowStore {
       .where(inArray(instances.id, due))
       .returning();
     claimed.sort((a, b) => a.wakeAt! - b.wakeAt! || a.createdAt - b.createdAt || (a.id < b.id ? -1 : 1));
-    return { instances: claimed.map(toInstance), lastSignalId: await this.lastSignalId(this.db) };
+    return claimed.map(toInstance);
   }
 
   async renew(id: string, token: string, leaseUntil: number) {
@@ -306,6 +372,7 @@ export class DrizzleWorkflowStore implements WorkflowStore {
         version: i.version,
         parentId: i.parentId ?? null,
         parentClose: i.parentClose ?? null,
+        concurrencyKey: i.concurrencyKey ?? null,
         status: 'pending',
         input: i.input,
         deadline: i.deadline,
@@ -367,7 +434,7 @@ export class DrizzleWorkflowStore implements WorkflowStore {
       .onConflictDoUpdate({ target: [journal.instanceId, journal.name], set: { entry: sql`excluded.entry` } });
   }
 
-  private async lastSignalId(db: Database) {
+  private async lastSignalId(db: Database | Transaction) {
     const [row] = await db.select({ id: max(signals.id) }).from(signals);
     return row?.id ?? 0;
   }

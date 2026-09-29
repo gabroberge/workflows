@@ -123,6 +123,8 @@ export interface StartChildWorkflowOptions {
    * `'abandon'` leaves it running on its own.
    */
   parentClose?: WorkflowParentClose;
+  /** As in `WorkflowClient.start()`: the child's key for its workflow's per-key concurrency limit. */
+  concurrencyKey?: string;
 }
 
 /** A started child workflow (`ctx.startChild()`). Also a condition for `ctx.waitForAny()`. */

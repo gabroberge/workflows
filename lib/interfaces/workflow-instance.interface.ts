@@ -21,6 +21,8 @@ export interface WorkflowInstance {
   parentId: string | null;
   /** For a child: what happens to it if it is still running when its parent ends. */
   parentClose: WorkflowParentClose | null;
+  /** The key its workflow's per-key concurrency limit counts it under, or `null`. */
+  concurrencyKey: string | null;
   status: WorkflowStatus;
   input: unknown;
   output?: unknown;

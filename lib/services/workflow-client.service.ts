@@ -70,7 +70,7 @@ export class WorkflowClient {
     const resolved = this.registry.resolve(workflow as Type<unknown> | string, options.version);
     const derived = options.id === undefined ? stepStartId(resolved.name) : undefined;
     const id = options.id ?? derived ?? randomUUID();
-    const data = newInstance(resolved, id, input, { caller: 'start()', now: this.clock.now(), timeout: options.timeout });
+    const data = newInstance(resolved, id, input, { caller: 'start()', now: this.clock.now(), timeout: options.timeout, concurrencyKey: options.concurrencyKey });
     // Nothing is awaited before the store's call: on a driver whose transactions are
     // synchronous, its statements must run before the application's transaction callback returns.
     const { instance, created } = await (options.transaction === undefined

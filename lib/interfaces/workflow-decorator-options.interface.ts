@@ -5,6 +5,30 @@ export interface WorkflowMetadata {
   version: number;
   /** In milliseconds. */
   timeout?: number;
+  /** `null`: no limit. `undefined`: not known here (a workflow started by name that this process doesn't register). */
+  concurrency?: WorkflowConcurrencyMetadata | null;
+}
+
+/** `@Workflow(name, { concurrency })`, validated. */
+export interface WorkflowConcurrencyMetadata {
+  /** At most this many instances of the workflow hold a slot, or `null`. */
+  limit: number | null;
+  /** At most this many per concurrency key, or `null`. */
+  perKey: number | null;
+  /** The key of an instance, from its input. */
+  key?: (input: any) => string | null | undefined;
+}
+
+/** One limit of `@Workflow(name, { concurrency })`. */
+export interface WorkflowConcurrency {
+  /** A positive integer: how many instances may run at once, of the workflow, or with `key`, per key. */
+  limit: number;
+  /**
+   * Makes `limit` a limit per key: the key of an instance, computed from its (JSON) input when
+   * it starts, such as `(order) => order.customerId`. `null` or `undefined` leaves the instance
+   * out of every key. `start()`'s `concurrencyKey` option overrides it.
+   */
+  key?: (input: any) => string | null | undefined;
 }
 
 export interface WorkflowDecoratorOptions {
@@ -22,4 +46,15 @@ export interface WorkflowDecoratorOptions {
    * `timeout` option overrides it. Default: none.
    */
   timeout?: Duration;
+  /**
+   * How many instances may run at once, across every worker: `{ limit }` for the workflow,
+   * `{ limit, key }` per key (at most one instance per customer: `{ limit: 1, key: (order) =>
+   * order.customerId }`), or one of each in an array. An instance holds a slot while an
+   * execution runs it (compensations included), not while it sleeps or waits for a signal: a
+   * limit protects what the steps call, and an instance parked for days doesn't hold up the
+   * others. Instances past a limit stay due and queue, most overdue first; one busy key never
+   * holds back the others. Applies to every version of the workflow, with the highest
+   * registered version's limits. Default: none.
+   */
+  concurrency?: WorkflowConcurrency | WorkflowConcurrency[];
 }

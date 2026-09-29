@@ -2,6 +2,8 @@ import { applyDecorators, Injectable, SetMetadata } from '@nestjs/common';
 import { runTimeoutMs } from '../utils/duration.util.js';
 import { WORKFLOW_METADATA } from '../workflows.constants.js';
 import type {
+  WorkflowConcurrency,
+  WorkflowConcurrencyMetadata,
   WorkflowMetadata,
   WorkflowDecoratorOptions,
 } from '../interfaces/workflow-decorator-options.interface.js';
@@ -22,5 +24,33 @@ export function Workflow(name: string, options: WorkflowDecoratorOptions = {}): 
   }
 
   const timeout = options.timeout === undefined ? undefined : runTimeoutMs(options.timeout, `workflow "${name}"`);
-  return applyDecorators(Injectable(), SetMetadata(WORKFLOW_METADATA, { name, version, timeout } satisfies WorkflowMetadata));
+  const concurrency = options.concurrency === undefined ? null : concurrencyOf(name, options.concurrency);
+  return applyDecorators(Injectable(), SetMetadata(WORKFLOW_METADATA, { name, version, timeout, concurrency } satisfies WorkflowMetadata));
+}
+
+function concurrencyOf(name: string, concurrency: WorkflowConcurrency | WorkflowConcurrency[]): WorkflowConcurrencyMetadata {
+  const limits = Array.isArray(concurrency) ? concurrency : [concurrency];
+  if (limits.length === 0 || limits.length > 2) {
+    throw new TypeError(`Workflow "${name}" has ${limits.length} concurrency limits. Give it one, or two: one without a key and one with.`);
+  }
+
+  const resolved: WorkflowConcurrencyMetadata = { limit: null, perKey: null };
+  for (const { limit, key } of limits) {
+    if (!Number.isSafeInteger(limit) || limit < 1) {
+      throw new TypeError(`Invalid concurrency limit ${JSON.stringify(limit)} for workflow "${name}". Use a positive integer.`);
+    }
+    if (key !== undefined && typeof key !== 'function') {
+      throw new TypeError(`Invalid concurrency key for workflow "${name}". Use a function of the input, such as (order) => order.customerId.`);
+    }
+
+    const slot = key === undefined ? 'limit' : 'perKey';
+    if (resolved[slot] !== null) {
+      throw new TypeError(`Workflow "${name}" has two concurrency limits ${key === undefined ? 'without' : 'with'} a key. Give it at most one of each.`);
+    }
+    resolved[slot] = limit;
+    if (key) {
+      resolved.key = key;
+    }
+  }
+  return resolved;
 }

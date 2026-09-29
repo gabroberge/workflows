@@ -275,7 +275,7 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
 
     const now = this.clock.now();
     const token = randomUUID();
-    const claim = this.store.claim({ owner: this.id, token, now, leaseUntil: now + this.deps.leaseMs, limit, workflows });
+    const claim = this.store.claim({ owner: this.id, token, now, leaseUntil: now + this.deps.leaseMs, limit, workflows, limits: this.registry.limits() });
     this.claiming.add(claim);
 
     try {

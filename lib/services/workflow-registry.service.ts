@@ -3,6 +3,7 @@ import { DiscoveryService } from '@nestjs/core';
 import { WorkflowNotFoundError } from '../errors/workflow-not-found.error.js';
 import type { WorkflowRunner } from '../interfaces/workflow-runner.interface.js';
 import type { WorkflowMetadata } from '../interfaces/workflow-decorator-options.interface.js';
+import type { WorkflowConcurrencyLimit } from '../interfaces/workflow-store.interface.js';
 import { WORKFLOW_EVENT_ROUTES_METADATA, WORKFLOW_METADATA } from '../workflows.constants.js';
 
 export interface WorkflowDefinition extends WorkflowMetadata {
@@ -35,6 +36,15 @@ export class WorkflowRegistry {
   /** The workflow versions this process can run, for claims. */
   versions(): Array<{ name: string; version: number }> {
     return [...this.load().values()].map(({ name, version }) => ({ name, version }));
+  }
+
+  /** The concurrency limits of the workflows this process runs, for claims: each name's highest registered version's. */
+  limits(): WorkflowConcurrencyLimit[] {
+    const names = new Set([...this.load().values()].map((def) => def.name));
+    return [...names].flatMap((name) => {
+      const concurrency = this.latest(name)!.concurrency;
+      return concurrency ? [{ workflow: name, limit: concurrency.limit, perKey: concurrency.perKey }] : [];
+    });
   }
 
   [ROUTE_EVENTS](): void {
@@ -82,17 +92,17 @@ export class WorkflowRegistry {
       if (!Number.isInteger(version) || version < 1) {
         throw new TypeError(`Invalid version ${version} for workflow "${name}". Use a positive integer.`);
       }
-      const timeout = this.get(name, version)?.timeout ?? (fallback?.version === version ? fallback.timeout : undefined);
-      return { name, version, timeout };
+      const known = this.get(name, version) ?? (fallback?.version === version ? fallback : undefined);
+      return { name, version, timeout: known?.timeout, concurrency: this.latest(name)?.concurrency ?? fallback?.concurrency ?? known?.concurrency };
     }
 
     const def = this.latest(name);
     if (def) {
-      return { name: def.name, version: def.version, timeout: def.timeout };
+      return { name: def.name, version: def.version, timeout: def.timeout, concurrency: def.concurrency };
     }
 
     if (fallback !== undefined) {
-      return { name, version: fallback.version, timeout: fallback.timeout };
+      return { name, version: fallback.version, timeout: fallback.timeout, concurrency: fallback.concurrency };
     }
     throw new WorkflowNotFoundError(
       `Workflow "${name}" is not registered in this application. Register it, or pass { version } to start it from a process that does not run it.`,

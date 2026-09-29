@@ -140,6 +140,15 @@ export interface WorkflowStore {
    * Two concurrent claims must never return the same instance: lock the candidates and skip
    * those another claim holds (`FOR UPDATE SKIP LOCKED`). Also returns the last signal id,
    * read after the claim, as the execution's signal cursor.
+   *
+   * `limits`: an instance holds a slot while its lease is live (`leaseUntil >= now`). Claim no
+   * instance of a listed workflow (any version) that would make more than `limit` of its
+   * instances hold a slot, or more than `perKey` of those with its `concurrencyKey` (instances
+   * without one count only toward `limit`). Pass over the candidates a full limit holds back
+   * and keep looking, so one busy key never holds back the others, taking each key's candidates
+   * in the usual order. Claims of a limited workflow must count and lease as one step: take a
+   * transaction-scoped lock per limited workflow name, in a fixed order, then count, so two
+   * claims never both take the last free slot.
    */
   claim(request: WorkflowClaimRequest): Promise<WorkflowClaim>;
   /**
@@ -176,6 +185,8 @@ export interface NewWorkflowInstance {
   parentId?: string | null;
   /** For a child: stored as `parentClose`. Absent: `null`. */
   parentClose?: WorkflowParentClose | null;
+  /** Stored as `concurrencyKey`: the key its workflow's per-key limit counts it under. Absent: `null`. */
+  concurrencyKey?: string | null;
   /** The instance's `deadline`: when its run timeout passes, or `null`. Stored as is. */
   deadline: number | null;
   /**
@@ -289,6 +300,17 @@ export interface WorkflowClaimRequest {
   limit: number;
   /** The workflow versions this worker runs (at least one). Leave the others to other workers. */
   workflows: Array<{ name: string; version: number }>;
+  /** Concurrency limits of some of those workflows (by name, every version). Absent or empty: none. */
+  limits?: WorkflowConcurrencyLimit[];
+}
+
+/** A workflow's concurrency limits, as a claim applies them. */
+export interface WorkflowConcurrencyLimit {
+  workflow: string;
+  /** At most this many of its instances hold a slot, or `null`. */
+  limit: number | null;
+  /** At most this many of its instances with the same non-null `concurrencyKey` hold a slot, or `null`. */
+  perKey: number | null;
 }
 
 export interface WorkflowClaim {
