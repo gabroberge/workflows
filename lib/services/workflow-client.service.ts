@@ -6,8 +6,12 @@ import type { WorkflowClock } from '../interfaces/workflow-clock.interface.js';
 import { WorkflowIdConflictError } from '../errors/workflow-id-conflict.error.js';
 import { WorkflowNotFoundError } from '../errors/workflow-not-found.error.js';
 import type { WorkflowInstance, WorkflowJournalEntry, WorkflowStatus } from '../interfaces/workflow-instance.interface.js';
-import type { WorkflowInput } from '../interfaces/workflow-runner.interface.js';
+import type { WorkflowInput, WorkflowOutput } from '../interfaces/workflow-runner.interface.js';
+import type { Journaled } from '../interfaces/workflow-context.interface.js';
+import { WorkflowFailedError, type WorkflowFailureStatus } from '../errors/workflow-failed.error.js';
+import { WorkflowResultTimeoutError } from '../errors/workflow-result-timeout.error.js';
 import { normalize } from './workflow-execution.service.js';
+import { canonical } from '../utils/canonical.util.js';
 import { signalName, type WorkflowSignal } from '../signals/workflow.signal.js';
 import { WorkflowStorage } from '../storage/workflow.storage.js';
 import { stepSignalId, stepStartId } from '../utils/step-scope.util.js';
@@ -24,6 +28,7 @@ import type {
   WorkflowListFilter,
   WorkflowDeleteOptions,
   WorkflowPurgeOptions,
+  WorkflowResultOptions,
   WorkflowRetryInstanceOptions,
   WorkflowSignalSendResult,
 } from '../interfaces/workflow-client.interface.js';
@@ -109,6 +114,100 @@ export class WorkflowClient {
       delete details.journal;
     }
     return details;
+  }
+
+  /**
+   * Waits for the instance to end and resolves with its output, or rejects with a
+   * `WorkflowFailedError` (its `status` is `failed`, `cancelled` or `compensation_failed`, its
+   * `cause` the instance's error). Rejects with `WorkflowResultTimeoutError` past `timeout` (the
+   * instance keeps running), and `WorkflowNotFoundError` for an unknown id or one deleted while
+   * waiting. An instance run by this process's worker is seen the moment it ends; one run
+   * elsewhere, at the next read of the store (every 25ms at first, backing off to every second).
+   */
+  async result<O = unknown>(id: string, options: WorkflowResultOptions = {}): Promise<Journaled<O>> {
+    const timeoutMs = options.timeout === undefined ? Infinity : toMs(options.timeout);
+    const deadline = performance.now() + timeoutMs;
+    options.signal?.throwIfAborted();
+
+    let ended = false;
+    let closed = false;
+    let wake: (() => void) | undefined;
+    const nudge = () => {
+      ended = true;
+      wake?.();
+    };
+    const subscription = this.events.events$.subscribe({
+      next: (event) => {
+        if (event.id === id && ENDED_EVENTS.has(event.type)) {
+          nudge();
+        }
+      },
+      complete: () => {
+        closed = true;
+        nudge();
+      },
+    });
+    options.signal?.addEventListener('abort', nudge);
+
+    try {
+      for (let delay = 25; ; delay = Math.min(delay * 2, 1_000)) {
+        ended = false;
+        const instance = await this.store.get(id);
+        if (!instance) {
+          throw new WorkflowNotFoundError(`No workflow instance with id "${id}".`);
+        }
+        if (instance.status === 'completed') {
+          return instance.output as Journaled<O>;
+        }
+        if (FINISHED.includes(instance.status)) {
+          throw failure(instance);
+        }
+
+        options.signal?.throwIfAborted();
+        if (closed) {
+          throw new Error(`The application shut down while waiting for the result of instance "${id}".`);
+        }
+        const remaining = deadline - performance.now();
+        if (remaining <= 0) {
+          throw new WorkflowResultTimeoutError(id, timeoutMs);
+        }
+        if (!ended) {
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, Math.min(delay, remaining));
+            wake = () => {
+              clearTimeout(timer);
+              resolve();
+            };
+          });
+          wake = undefined;
+        }
+      }
+    } finally {
+      subscription.unsubscribe();
+      options.signal?.removeEventListener('abort', nudge);
+    }
+  }
+
+  /**
+   * `start()`, then `result()`: resolves with the output of the instance (the existing one, for
+   * an id that already has one), or rejects as `result()` does. `wait` is `result()`'s options;
+   * `options.timeout` stays the instance's run timeout. Not with `{ transaction }`: the instance
+   * wouldn't exist before your transaction commits.
+   */
+  async startAndWait<W>(
+    workflow: Type<W> | string,
+    input: WorkflowInput<W>,
+    options: StartWorkflowOptions = {},
+    wait: WorkflowResultOptions = {},
+  ): Promise<Journaled<WorkflowOutput<W>>> {
+    if (options.transaction !== undefined) {
+      throw new TypeError(
+        "startAndWait() can't take { transaction }: the instance only exists once your transaction commits. Call start() in it, and result() after the commit.",
+      );
+    }
+
+    const { id } = await this.start(workflow, input, options);
+    return this.result<WorkflowOutput<W>>(id, wait);
   }
 
   /** Instances by status, workflow name and version, oldest first. At most `limit` (default 100). */
@@ -351,17 +450,20 @@ export class WorkflowClient {
 }
 
 const FINISHED: WorkflowStatus[] = ['completed', 'failed', 'cancelled', 'compensation_failed'];
+const ENDED_EVENTS = new Set<WorkflowEvent['type']>(['workflow-completed', 'workflow-failed', 'workflow-cancelled', 'workflow-compensation-failed', 'workflow-deleted']);
+
+/** What `result()` rejects with for an instance that ended without completing. */
+function failure(instance: WorkflowInstance): WorkflowFailedError {
+  const status = instance.status as WorkflowFailureStatus;
+  const cause = instance.error ?? { name: 'Error', message: 'Unknown failure.' };
+  return new WorkflowFailedError(`Instance "${instance.id}" of workflow "${instance.workflow}" ${status.replace('_', ' ')}: ${cause.name}: ${cause.message}`, {
+    instanceId: instance.id,
+    status,
+    cause,
+  });
+}
 const DEFAULT_PURGE: WorkflowStatus[] = ['completed', 'failed', 'cancelled'];
 const ALL: WorkflowStatus[] = ['pending', 'running', 'suspended', 'compensating', ...FINISHED];
-
-/** Internal: JSON with sorted object keys, to compare inputs and payloads. */
-export function canonical(value: unknown): string {
-  return JSON.stringify(value, (_key, v) =>
-    v && typeof v === 'object' && !Array.isArray(v)
-      ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
-      : v,
-  ) ?? 'undefined';
-}
 
 function describeKey(key: string | null): string {
   return key === null ? 'no key' : `key "${key}"`;

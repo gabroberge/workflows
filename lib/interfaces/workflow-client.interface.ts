@@ -55,6 +55,17 @@ export interface SignalWorkflowOptions {
   transaction?: unknown;
 }
 
+/** What `result()` and `startAndWait()` take. */
+export interface WorkflowResultOptions {
+  /**
+   * How long to wait. Past it, the call rejects with `WorkflowResultTimeoutError`, and the
+   * instance keeps running. Wall-clock time, not the module's clock. Default: no limit.
+   */
+  timeout?: Duration;
+  /** Stops waiting once aborted (a client that went away), rejecting with the signal's reason. */
+  signal?: AbortSignal;
+}
+
 /** What `signal()` returns. */
 export interface WorkflowSignalSendResult {
   /** The stored signal's id: the new one, or with `created: false` the one stored earlier with the same `id`. */

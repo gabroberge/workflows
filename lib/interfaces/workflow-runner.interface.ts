@@ -6,3 +6,5 @@ export interface WorkflowRunner<I = unknown, O = unknown> {
 }
 
 export type WorkflowInput<W> = W extends { run(ctx: any, input: infer I): any } ? I : unknown;
+
+export type WorkflowOutput<W> = W extends { run(ctx: any, input: any): infer R } ? Awaited<R> : unknown;

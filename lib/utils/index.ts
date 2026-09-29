@@ -1,3 +1,4 @@
+export * from './canonical.util.js';
 export * from './clock.util.js';
 export * from './duration.util.js';
 export * from './retry.util.js';

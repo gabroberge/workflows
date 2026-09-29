@@ -6,6 +6,7 @@ export * from './workflow-failed.error.js';
 export * from './workflow-id-conflict.error.js';
 export * from './workflow-interrupt.error.js';
 export * from './workflow-non-determinism.error.js';
+export * from './workflow-result-timeout.error.js';
 export * from './workflow-state.error.js';
 export * from './workflow-not-found.error.js';
 export * from './workflow.error.js';

@@ -36,6 +36,7 @@ export type {
   WorkflowJournalEntry,
   WorkflowListFilter,
   WorkflowPurgeOptions,
+  WorkflowResultOptions,
   WorkflowRetryInstanceOptions,
   WorkflowSignalSendResult,
   WorkflowStartResult,
@@ -56,7 +57,9 @@ export {
   WorkflowInterrupt,
   WorkflowNonDeterminismError,
   WorkflowNotFoundError,
+  WorkflowResultTimeoutError,
   WorkflowStateError,
+  type WorkflowFailureStatus,
 } from './errors/index.js';
 export type { SerializedWorkflowError } from './interfaces/index.js';
 
