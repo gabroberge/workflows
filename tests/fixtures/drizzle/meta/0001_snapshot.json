@@ -1,5 +1,5 @@
 {
-  "id": "127eaaca-38eb-4d32-ae9f-89bcf0873233",
+  "id": "6905e58d-b613-4d58-91b4-a7158028ba36",
   "prevId": "aae1f06b-1318-499b-ae7a-26eaa6c95080",
   "version": "7",
   "dialect": "postgresql",
@@ -86,6 +86,19 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
+        },
+        "rate_limit_key": {
+          "name": "rate_limit_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "priority": {
+          "name": "priority",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
         },
         "status": {
           "name": "status",
@@ -371,6 +384,67 @@
           ]
         }
       },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.workflow_rate_limits": {
+      "name": "workflow_rate_limits",
+      "schema": "",
+      "columns": {
+        "workflow": {
+          "name": "workflow",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "key": {
+          "name": "key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "window_end": {
+          "name": "window_end",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "count": {
+          "name": "count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "workflow_rate_limits_end": {
+          "name": "workflow_rate_limits_end",
+          "columns": [
+            {
+              "expression": "window_end",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "workflow_rate_limits_workflow_key_pk": {
+          "name": "workflow_rate_limits_workflow_key_pk",
+          "columns": [
+            "workflow",
+            "key"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false

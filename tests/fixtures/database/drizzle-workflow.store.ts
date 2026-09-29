@@ -24,7 +24,13 @@ import {
 import { and, asc, eq, gt, inArray, isNotNull, isNull, lt, lte, max, or, sql, type Column, type SQL, type SQLWrapper } from 'drizzle-orm';
 import { PgTransaction } from 'drizzle-orm/pg-core';
 import type { Database, Transaction } from './drizzle.js';
-import { workflowInstances as instances, workflowJournal as journal, workflowSignals as signals, workflowWaits as waits } from './schema.js';
+import {
+  workflowInstances as instances,
+  workflowJournal as journal,
+  workflowRateLimits as rateLimits,
+  workflowSignals as signals,
+  workflowWaits as waits,
+} from './schema.js';
 
 /**
  * Serializes signals with each other (exclusive) and with suspensions that register waits
@@ -194,7 +200,20 @@ export class DrizzleWorkflowStore implements WorkflowStore {
       .limit(query.limit);
     const pruned = await this.db.delete(signals).where(inArray(signals.id, prunable)).returning({ id: signals.id });
 
-    return { instances: purged.length, signals: pruned.length };
+    // Rate-limit windows that ended: again on the deleted rows, as a claim may have opened a new one meanwhile.
+    const ended = lt(rateLimits.windowEnd, query.before);
+    const oldestWindows = this.db
+      .select({ workflow: rateLimits.workflow, key: rateLimits.key })
+      .from(rateLimits)
+      .where(ended)
+      .orderBy(asc(rateLimits.windowEnd), asc(rateLimits.workflow), asc(rateLimits.key))
+      .limit(query.limit);
+    const windows = await this.db
+      .delete(rateLimits)
+      .where(and(sql`(${rateLimits.workflow}, ${rateLimits.key}) IN ${oldestWindows}`, ended))
+      .returning({ workflow: rateLimits.workflow });
+
+    return { instances: purged.length, signals: pruned.length, rateLimits: windows.length };
   }
 
   // ---------------------------------------------------------------- the worker
@@ -209,7 +228,7 @@ export class DrizzleWorkflowStore implements WorkflowStore {
       or(isNull(instances.leaseUntil), lt(instances.leaseUntil, now)),
       or(...request.workflows.map((w) => and(eq(instances.workflow, w.name), eq(instances.version, w.version)))),
     );
-    if (request.limits?.length) {
+    if (request.limits?.length || request.rateLimits?.length) {
       return this.db.transaction((tx) => this.claimWithin(tx, request, isDue!), READ_COMMITTED);
     }
 
@@ -218,30 +237,38 @@ export class DrizzleWorkflowStore implements WorkflowStore {
       .select({ id: instances.id })
       .from(instances)
       .where(isDue)
-      .orderBy(asc(instances.wakeAt), asc(instances.createdAt), asc(instances.id))
+      .orderBy(asc(instances.priority), asc(instances.wakeAt), asc(instances.createdAt), asc(instances.id))
       .limit(request.limit)
       .for('update', { skipLocked: true });
     return { instances: await this.lease(this.db, request, due), lastSignalId: await this.lastSignalId(this.db) };
   }
 
   /**
-   * A claim under concurrency limits. Claims of a limited workflow take its lock first (in name
-   * order, so two claims never wait for each other's), so they count the slots live leases hold
-   * and lease the instances that fit one after the other: two never both take the last slot.
+   * A claim under concurrency or rate limits. Claims of a workflow with a concurrency limit take its lock first
+   * (in name order, so two claims never wait for each other's), so they count the slots live leases hold and
+   * lease the instances that fit one after the other: two never both take the last slot. Rate-limit windows are
+   * counted again under their rows' locks, once the instances are picked (see `takeRoom()`).
    */
   private async claimWithin(tx: Transaction, request: WorkflowClaimRequest, isDue: SQL): Promise<WorkflowClaim> {
-    const limits = request.limits!;
+    const limits = request.limits ?? [];
+    const rates = request.rateLimits ?? [];
     for (const workflow of [...new Set(limits.map((limit) => limit.workflow))].sort()) {
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`@nestjs/workflows:concurrency:${workflow}`}))`);
     }
 
-    // Each key's candidates in order, as many as its free slots; then each workflow's, of those,
-    // as many as its free slots. A full key is passed over, not waited behind.
+    // Candidates with no room at all are passed over; then each concurrency key's first, as many as its free slots;
+    // of those, each rate key's, as many as its window has room for; of those, each workflow's, as many as both its
+    // free slots and its window allow. A full key is passed over, not waited behind. The windows read here are a
+    // snapshot, re-counted under their locks in takeRoom().
     const { now } = request;
     const { rows } = await tx.execute<{ id: string }>(sql`
       WITH limits AS (
         SELECT * FROM jsonb_to_recordset(${JSON.stringify(limits.map((l) => ({ workflow: l.workflow, total: l.limit, per_key: l.perKey })))}::jsonb)
           AS l(workflow text, total int, per_key int)
+      ),
+      rates AS (
+        SELECT * FROM jsonb_to_recordset(${JSON.stringify(rates.map((r) => ({ workflow: r.workflow, total: r.limit?.max ?? null, per_key: r.perKey?.max ?? null })))}::jsonb)
+          AS r(workflow text, total int, per_key int)
       ),
       held AS (
         SELECT ${instances.workflow} AS workflow, ${instances.concurrencyKey} AS key, count(*)::int AS n
@@ -249,36 +276,124 @@ export class DrizzleWorkflowStore implements WorkflowStore {
         WHERE ${instances.leaseUntil} >= ${now} AND ${instances.workflow} IN (SELECT workflow FROM limits)
         GROUP BY 1, 2
       ),
+      used AS (
+        SELECT ${rateLimits.workflow} AS workflow, ${rateLimits.key} AS key, ${rateLimits.count} AS n
+        FROM ${rateLimits}
+        WHERE ${rateLimits.windowEnd} > ${now} AND ${rateLimits.workflow} IN (SELECT workflow FROM rates)
+      ),
       due AS (
         SELECT ${instances.id} AS id, ${instances.workflow} AS workflow, ${instances.concurrencyKey} AS key,
-          ${instances.wakeAt} AS wake_at, ${instances.createdAt} AS created_at,
-          row_number() OVER (PARTITION BY ${instances.workflow}, ${instances.concurrencyKey} ORDER BY ${instances.wakeAt}, ${instances.createdAt}, ${instances.id}) AS key_rank
+          ${instances.rateLimitKey} AS rate_key, ${instances.priority} AS priority, ${instances.wakeAt} AS wake_at,
+          ${instances.createdAt} AS created_at,
+          row_number() OVER (
+            PARTITION BY ${instances.workflow}, ${instances.concurrencyKey}
+            ORDER BY ${instances.priority}, ${instances.wakeAt}, ${instances.createdAt}, ${instances.id}
+          ) AS key_rank
         FROM ${instances}
+        LEFT JOIN limits l ON l.workflow = ${instances.workflow}
+        LEFT JOIN rates r ON r.workflow = ${instances.workflow}
         WHERE ${isDue}
+          AND (l.total IS NULL OR coalesce((SELECT sum(n) FROM held h WHERE h.workflow = l.workflow), 0) < l.total)
+          AND (l.per_key IS NULL OR ${instances.concurrencyKey} IS NULL
+            OR coalesce((SELECT n FROM held h WHERE h.workflow = l.workflow AND h.key = ${instances.concurrencyKey}), 0) < l.per_key)
+          AND (r.total IS NULL OR coalesce((SELECT n FROM used u WHERE u.workflow = r.workflow AND u.key = ''), 0) < r.total)
+          AND (r.per_key IS NULL OR ${instances.rateLimitKey} IS NULL
+            OR coalesce((SELECT n FROM used u WHERE u.workflow = r.workflow AND u.key = ${instances.rateLimitKey}), 0) < r.per_key)
       ),
       fits_key AS (
-        SELECT d.*, row_number() OVER (PARTITION BY d.workflow ORDER BY d.wake_at, d.created_at, d.id) AS workflow_rank
+        SELECT d.*, row_number() OVER (PARTITION BY d.workflow, d.rate_key ORDER BY d.priority, d.wake_at, d.created_at, d.id) AS rate_key_rank
         FROM due d
         LEFT JOIN limits l ON l.workflow = d.workflow
         WHERE l.per_key IS NULL OR d.key IS NULL
           OR d.key_rank <= l.per_key - coalesce((SELECT n FROM held h WHERE h.workflow = d.workflow AND h.key = d.key), 0)
+      ),
+      fits_rate_key AS (
+        SELECT f.*, row_number() OVER (PARTITION BY f.workflow ORDER BY f.priority, f.wake_at, f.created_at, f.id) AS workflow_rank
+        FROM fits_key f
+        LEFT JOIN rates r ON r.workflow = f.workflow
+        WHERE r.per_key IS NULL OR f.rate_key IS NULL
+          OR f.rate_key_rank <= r.per_key - coalesce((SELECT n FROM used u WHERE u.workflow = f.workflow AND u.key = f.rate_key), 0)
       )
-      SELECT f.id FROM fits_key f
+      SELECT f.id FROM fits_rate_key f
       LEFT JOIN limits l ON l.workflow = f.workflow
-      WHERE l.total IS NULL OR f.workflow_rank <= l.total - coalesce((SELECT sum(n)::int FROM held h WHERE h.workflow = f.workflow), 0)
-      ORDER BY f.wake_at, f.created_at, f.id
+      LEFT JOIN rates r ON r.workflow = f.workflow
+      WHERE (l.total IS NULL OR f.workflow_rank <= l.total - coalesce((SELECT sum(n)::int FROM held h WHERE h.workflow = f.workflow), 0))
+        AND (r.total IS NULL OR f.workflow_rank <= r.total - coalesce((SELECT n FROM used u WHERE u.workflow = f.workflow AND u.key = ''), 0))
+      ORDER BY f.priority, f.wake_at, f.created_at, f.id
       LIMIT ${request.limit}
     `);
     if (rows.length === 0) {
       return { instances: [], lastSignalId: await this.lastSignalId(tx) };
     }
 
-    const due = tx
-      .select({ id: instances.id })
+    const picked = await tx
+      .select({ id: instances.id, workflow: instances.workflow, rateLimitKey: instances.rateLimitKey })
       .from(instances)
       .where(and(inArray(instances.id, rows.map((row) => row.id)), isDue))
+      .orderBy(asc(instances.priority), asc(instances.wakeAt), asc(instances.createdAt), asc(instances.id))
       .for('update', { skipLocked: true });
-    return { instances: await this.lease(tx, request, due), lastSignalId: await this.lastSignalId(tx) };
+    const granted = await this.takeRoom(tx, request, picked);
+    if (granted.length === 0) {
+      return { instances: [], lastSignalId: await this.lastSignalId(tx) };
+    }
+    return { instances: await this.lease(tx, request, tx.select({ id: instances.id }).from(instances).where(inArray(instances.id, granted))), lastSignalId: await this.lastSignalId(tx) };
+  }
+
+  /**
+   * Of `picked` (in claim order), the instances their rate-limit windows have room for, recorded in the windows.
+   * Each window's row is inserted or locked first, in a fixed order: the count read under the lock is exact (a
+   * concurrent claim of the same window waits for this one), and a purge can't delete the row in between.
+   */
+  private async takeRoom(tx: Transaction, request: WorkflowClaimRequest, picked: Array<{ id: string; workflow: string; rateLimitKey: string | null }>): Promise<string[]> {
+    const rules = new Map((request.rateLimits ?? []).map((rule) => [rule.workflow, rule]));
+    const windowsOf = ({ workflow, rateLimitKey }: (typeof picked)[number]) => {
+      const rule = rules.get(workflow);
+      return [
+        ...(rule?.limit ? [{ workflow, key: '', ...rule.limit }] : []),
+        ...(rule?.perKey && rateLimitKey !== null ? [{ workflow, key: rateLimitKey, ...rule.perKey }] : []),
+      ];
+    };
+    const named = new Map(picked.flatMap(windowsOf).map((window) => [JSON.stringify([window.workflow, window.key]), window]));
+    if (named.size === 0) {
+      return picked.map((instance) => instance.id);
+    }
+
+    const { now } = request;
+    const order = [...named.values()].sort((a, b) => (a.workflow < b.workflow ? -1 : a.workflow > b.workflow ? 1 : a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+    const locked = await tx
+      .insert(rateLimits)
+      .values(order.map(({ workflow, key }) => ({ workflow, key, windowEnd: 0, count: 0 })))
+      .onConflictDoUpdate({ target: [rateLimits.workflow, rateLimits.key], set: { count: sql`${rateLimits.count}` } })
+      .returning();
+    const open = new Map(locked.map((row) => [JSON.stringify([row.workflow, row.key]), row.windowEnd > now ? { windowEnd: row.windowEnd, count: row.count } : null]));
+
+    const granted: string[] = [];
+    const changed = new Map<string, { workflow: string; key: string; windowEnd: number; count: number }>();
+    for (const instance of picked) {
+      const windows = windowsOf(instance);
+      if (!windows.every((window) => (open.get(JSON.stringify([window.workflow, window.key]))?.count ?? 0) < window.max)) {
+        continue;
+      }
+
+      for (const window of windows) {
+        const name = JSON.stringify([window.workflow, window.key]);
+        const current = open.get(name) ?? { windowEnd: now + window.duration, count: 0 };
+        current.count++;
+        open.set(name, current);
+        changed.set(name, { workflow: window.workflow, key: window.key, ...current });
+      }
+      granted.push(instance.id);
+    }
+
+    if (changed.size > 0) {
+      await tx.execute(sql`
+        UPDATE ${rateLimits} SET window_end = v.window_end, count = v.count
+        FROM jsonb_to_recordset(${JSON.stringify([...changed.values()].map((w) => ({ workflow: w.workflow, key: w.key, window_end: w.windowEnd, count: w.count })))}::jsonb)
+          AS v(workflow text, key text, window_end bigint, count int)
+        WHERE ${rateLimits.workflow} = v.workflow AND ${rateLimits.key} = v.key
+      `);
+    }
+    return granted;
   }
 
   /** Leases the instances `due` selects (and locks). */
@@ -296,7 +411,7 @@ export class DrizzleWorkflowStore implements WorkflowStore {
       })
       .where(inArray(instances.id, due))
       .returning();
-    claimed.sort((a, b) => a.wakeAt! - b.wakeAt! || a.createdAt - b.createdAt || (a.id < b.id ? -1 : 1));
+    claimed.sort((a, b) => a.priority - b.priority || a.wakeAt! - b.wakeAt! || a.createdAt - b.createdAt || (a.id < b.id ? -1 : 1));
     return claimed.map(toInstance);
   }
 
@@ -373,6 +488,8 @@ export class DrizzleWorkflowStore implements WorkflowStore {
         parentId: i.parentId ?? null,
         parentClose: i.parentClose ?? null,
         concurrencyKey: i.concurrencyKey ?? null,
+        rateLimitKey: i.rateLimitKey ?? null,
+        priority: i.priority ?? 0,
         status: 'pending',
         input: i.input,
         deadline: i.deadline,

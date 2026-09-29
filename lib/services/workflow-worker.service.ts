@@ -172,9 +172,9 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
   }
 
   /**
-   * Executes every due instance, repeatedly, until none is left. Returns the
-   * number of executions. For tests (with a `ManualWorkflowClock` and `worker: false`),
-   * scripts and cron-driven workers.
+   * Executes every due instance, repeatedly, until none is left that its workflow's concurrency and rate
+   * limits let start. Returns the number of executions. For tests (with a `ManualWorkflowClock` and
+   * `worker: false`), scripts and cron-driven workers.
    */
   async drain(options: { maxRounds?: number } = {}): Promise<number> {
     let total = 0;
@@ -275,7 +275,16 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
 
     const now = this.clock.now();
     const token = randomUUID();
-    const claim = this.store.claim({ owner: this.id, token, now, leaseUntil: now + this.deps.leaseMs, limit, workflows, limits: this.registry.limits() });
+    const claim = this.store.claim({
+      owner: this.id,
+      token,
+      now,
+      leaseUntil: now + this.deps.leaseMs,
+      limit,
+      workflows,
+      limits: this.registry.limits(),
+      rateLimits: this.registry.rateLimits(),
+    });
     this.claiming.add(claim);
 
     try {

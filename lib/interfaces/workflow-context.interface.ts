@@ -125,6 +125,10 @@ export interface StartChildWorkflowOptions {
   parentClose?: WorkflowParentClose;
   /** As in `WorkflowClient.start()`: the child's key for its workflow's per-key concurrency limit. */
   concurrencyKey?: string;
+  /** As in `WorkflowClient.start()`: the child's key for its workflow's per-key rate limit. */
+  rateLimitKey?: string;
+  /** As in `WorkflowClient.start()`. Default: this instance's priority. */
+  priority?: number;
 }
 
 /** A started child workflow (`ctx.startChild()`). Also a condition for `ctx.waitForAny()`. */

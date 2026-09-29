@@ -63,7 +63,7 @@ interface SqlBackend {
 }
 
 const truncate = async (db: Database) => {
-  await db.execute(sql`TRUNCATE workflow_instances, workflow_journal, workflow_waits, workflow_signals RESTART IDENTITY`);
+  await db.execute(sql`TRUNCATE workflow_instances, workflow_journal, workflow_waits, workflow_signals, workflow_rate_limits RESTART IDENTITY`);
 };
 
 async function pgliteBackend(): Promise<SqlBackend> {

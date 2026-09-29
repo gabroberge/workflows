@@ -26,6 +26,10 @@ export const workflowInstances = pgTable(
     parentClose: text('parent_close').$type<WorkflowParentClose>(),
     /** The key its workflow's per-key concurrency limit counts it under. */
     concurrencyKey: text('concurrency_key'),
+    /** The key its workflow's per-key rate limit counts it under. */
+    rateLimitKey: text('rate_limit_key'),
+    /** Lower is claimed first; 0 (none given) before every other. */
+    priority: integer('priority').notNull().default(0),
     status: text('status').$type<WorkflowStatus>().notNull(),
     input: jsonb('input'),
     output: jsonb('output'),
@@ -83,6 +87,22 @@ export const workflowWaits = pgTable(
     key: text('key'),
   },
   (t) => [primaryKey({ columns: [t.instanceId, t.position] }), index('workflow_waits_signal').on(t.signal, t.key)],
+);
+
+/**
+ * The rate-limit windows claims count: the workflow's own (`key` '', which no instance key is) and one per key.
+ * A window whose `window_end` passed is over; the next claim starts a new one.
+ */
+export const workflowRateLimits = pgTable(
+  'workflow_rate_limits',
+  {
+    workflow: text('workflow').notNull(),
+    key: text('key').notNull(),
+    windowEnd: bigint('window_end', { mode: 'number' }).notNull(),
+    count: integer('count').notNull(),
+  },
+  // What purges look for: windows that ended.
+  (t) => [primaryKey({ columns: [t.workflow, t.key] }), index('workflow_rate_limits_end').on(t.windowEnd)],
 );
 
 export const workflowSignals = pgTable(

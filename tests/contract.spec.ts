@@ -46,7 +46,7 @@ if (storeKind === 'memory') {
 // The suite itself, once: it needs no database.
 if (storeKind === 'memory') {
   describe('the contract suite', () => {
-    it("fails a store that loses a wake-up, one that skips the fence, one that ignores dedupe ids, one that drops the custom status, one that ignores terminates, ones that drop a write's signal or the parent filter, and one that ignores concurrency limits", async () => {
+    it("fails a store that loses a wake-up, one that skips the fence, one that ignores dedupe ids, one that drops the custom status, one that ignores terminates, ones that drop a write's signal or the parent filter, and ones that ignore concurrency limits, rate limits or priorities", async () => {
       /** Registers waits without looking for signals that arrived after the execution's cursor. */
       class NoMissedSignalCheck extends InMemoryWorkflowStore {
         override async write(...[id, token, write]: Parameters<InMemoryWorkflowStore['write']>) {
@@ -97,6 +97,20 @@ if (storeKind === 'memory') {
         }
       }
 
+      /** Claims past every rate limit. */
+      class NoRateLimits extends InMemoryWorkflowStore {
+        override async claim(...[request]: Parameters<InMemoryWorkflowStore['claim']>) {
+          return super.claim({ ...request, rateLimits: [] });
+        }
+      }
+
+      /** Stores every instance without its priority. */
+      class NoPriority extends InMemoryWorkflowStore {
+        override async create(...[instance]: Parameters<InMemoryWorkflowStore['create']>) {
+          return super.create({ ...instance, priority: 0 });
+        }
+      }
+
       /** Stores every signal, dedupe id or not. */
       class NoDedupe extends InMemoryWorkflowStore {
         override async signal(...[signal]: Parameters<InMemoryWorkflowStore['signal']>) {
@@ -134,7 +148,19 @@ if (storeKind === 'memory') {
       expect(await failures(() => new NoLimits())).toEqual([
         "claim() under a workflow's limit leases no more than it allows, counting the leases still live",
         'claim() keeps at most perKey of a key leased, passes over a full key, and takes each key in order',
+        'claim() takes the lowest priority first (none before any), then the most overdue, with or without limits',
+        'claim() applies rate limits and concurrency limits together, in stages',
         'concurrent claims never lease more than a limit allows, and fill every free slot',
+      ]);
+      expect(await failures(() => new NoRateLimits())).toEqual([
+        "claim() under a workflow's rate limit starts at most max per window, and opens the next window at the first claim after it ended",
+        'claim() under per-key rate limits keeps each key to its window, passes over a full key, and counts keyless instances only toward the workflow',
+        'claim() applies rate limits and concurrency limits together, in stages',
+        'purge() deletes the rate-limit windows that ended before `before`, oldest first, and keeps the open ones',
+        'concurrent claims never start more than a rate limit allows in a window, and fill its room',
+      ]);
+      expect(await failures(() => new NoPriority())).toEqual([
+        'claim() takes the lowest priority first (none before any), then the most overdue, with or without limits',
       ]);
       expect(await failures(() => new ExpiryFence())).toEqual(
         expect.arrayContaining(['write() changes nothing under a stale token', "a stale lease holder's writes never land, however they interleave with the new holder's"]),

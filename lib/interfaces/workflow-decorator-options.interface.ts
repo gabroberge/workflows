@@ -7,6 +7,8 @@ export interface WorkflowMetadata {
   timeout?: number;
   /** `null`: no limit. `undefined`: not known here (a workflow started by name that this process doesn't register). */
   concurrency?: WorkflowConcurrencyMetadata | null;
+  /** `null`: no limit. `undefined`: not known here, as for `concurrency`. */
+  rateLimit?: WorkflowRateLimitMetadata | null;
 }
 
 /** `@Workflow(name, { concurrency })`, validated. */
@@ -19,6 +21,22 @@ export interface WorkflowConcurrencyMetadata {
   key?: (input: any) => string | null | undefined;
 }
 
+/** `@Workflow(name, { rateLimit })`, validated. */
+export interface WorkflowRateLimitMetadata {
+  /** The workflow's own window, or `null`. */
+  limit: WorkflowRateWindow | null;
+  /** Each key's window, or `null`. */
+  perKey: WorkflowRateWindow | null;
+  /** The key of an instance, from its input. */
+  key?: (input: any) => string | null | undefined;
+}
+
+/** At most `max` executions start per window of `duration` milliseconds. */
+export interface WorkflowRateWindow {
+  max: number;
+  duration: number;
+}
+
 /** One limit of `@Workflow(name, { concurrency })`. */
 export interface WorkflowConcurrency {
   /** A positive integer: how many instances may run at once, of the workflow, or with `key`, per key. */
@@ -27,6 +45,20 @@ export interface WorkflowConcurrency {
    * Makes `limit` a limit per key: the key of an instance, computed from its (JSON) input when
    * it starts, such as `(order) => order.customerId`. `null` or `undefined` leaves the instance
    * out of every key. `start()`'s `concurrencyKey` option overrides it.
+   */
+  key?: (input: any) => string | null | undefined;
+}
+
+/** One limit of `@Workflow(name, { rateLimit })`. */
+export interface WorkflowRateLimit {
+  /** A positive integer: how many executions may start per `duration`, of the workflow, or with `key`, per key. */
+  max: number;
+  /** The window, such as `'1m'`. */
+  duration: Duration;
+  /**
+   * Makes the limit a limit per key: the key of an instance, computed from its (JSON) input when it starts, such
+   * as `(order) => order.customerId`. `null` or `undefined` leaves the instance out of every key. `start()`'s
+   * `rateLimitKey` option overrides it.
    */
   key?: (input: any) => string | null | undefined;
 }
@@ -57,4 +89,14 @@ export interface WorkflowDecoratorOptions {
    * registered version's limits. Default: none.
    */
   concurrency?: WorkflowConcurrency | WorkflowConcurrency[];
+  /**
+   * How many executions may start per window, across every worker: `{ max, duration }` for the workflow,
+   * `{ max, duration, key }` per key (at most 5 a minute per customer: `{ max: 5, duration: '1m', key: (order) =>
+   * order.customerId }`), or one of each in an array. Every execution counts: an instance's first run and each
+   * resumption (after a sleep, a signal, a retry's backoff, a cancel), because each can call what the limit
+   * protects. A window starts with the first execution after the previous window ended. Instances past a limit stay
+   * due and wait, in priority order; one busy key never holds back the others. Applies to every version of the
+   * workflow, with the highest registered version's limits. Default: none.
+   */
+  rateLimit?: WorkflowRateLimit | WorkflowRateLimit[];
 }

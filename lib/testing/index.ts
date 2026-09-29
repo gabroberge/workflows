@@ -1,7 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { WorkflowJournalEntry } from '../interfaces/workflow-instance.interface.js';
-import type { WorkflowClaim, WorkflowConcurrencyLimit, WorkflowStore, WorkflowWrite } from '../interfaces/workflow-store.interface.js';
+import type {
+  WorkflowClaim,
+  WorkflowConcurrencyLimit,
+  WorkflowRateLimitRule,
+  WorkflowStore,
+  WorkflowWrite,
+} from '../interfaces/workflow-store.interface.js';
 
 export interface WorkflowStoreContractOptions {
   /**
@@ -74,6 +80,8 @@ export function workflowStoreContract(
         parentId: null,
         parentClose: null,
         concurrencyKey: null,
+        rateLimitKey: null,
+        priority: 0,
         status: 'pending',
         input,
         error: null,
@@ -213,6 +221,107 @@ export function workflowStoreContract(
     await t.keyed('c5-a', 'customer-5', 7);
     equal((await t.claim(10, { token: 't5', limits: both })).instances.map((i) => i.id), ['c4-a'], 'the fifth slot');
     equal((await t.claim(10, { token: 't6', limits: both })).instances.map((i) => i.id), [], 'the workflow full');
+  });
+
+  add('claim() takes the lowest priority first (none before any), then the most overdue, with or without limits', async (t) => {
+    const instances: Array<[string, number, number]> = [
+      ['late-none', 50, 0],
+      ['p5', 0, 5],
+      ['early-none', 10, 0],
+      ['p1-late', 40, 1],
+      ['p1-early', 20, 1],
+    ];
+    for (const [id, now, priority] of instances) {
+      await t.prioritized(id, now, priority === 0 ? {} : { priority });
+    }
+    expect(await t.store.get('p5'), { priority: 5, rateLimitKey: null }, 'the priority, stored');
+    expect(await t.store.get('late-none'), { priority: 0 }, 'none given: 0');
+
+    const order = ['early-none', 'late-none', 'p1-early', 'p1-late', 'p5'];
+    equal(await t.claimAndFinish(100, { limit: 3 }), order.slice(0, 3), 'the first three');
+    equal(await t.claimAndFinish(100), order.slice(3), 'the rest');
+
+    // The same order through the limited path, one at a time.
+    for (const [id, now, priority] of instances) {
+      await t.prioritized(`k-${id}`, now, { priority });
+    }
+    const limits = [{ workflow: W.name, limit: 1, perKey: null }];
+    const taken: string[] = [];
+    for (let i = 0; i < order.length; i++) {
+      const [instance] = (await t.claim(200, { token: `l${i}`, limits, leaseUntil: 9_000 })).instances;
+      taken.push(instance?.id ?? 'nothing');
+      await t.release(instance?.id ?? 'nothing', `l${i}`);
+    }
+    equal(taken, order.map((id) => `k-${id}`), 'with a concurrency limit');
+  });
+
+  add("claim() under a workflow's rate limit starts at most max per window, and opens the next window at the first claim after it ended", async (t) => {
+    for (let i = 0; i < 7; i++) {
+      await t.prioritized(`r${i}`, i);
+    }
+    await t.create('x', 0, 'invoice-batch');
+    const rateLimits = [{ workflow: W.name, limit: { max: 3, duration: 1_000 }, perKey: null }];
+    const claim = (now: number, o: { limit?: number } = {}) =>
+      t.claimAndFinish(now, { rateLimits, workflows: [W, { name: 'invoice-batch', version: 1 }], ...o });
+
+    equal(await claim(100, { limit: 2 }), ['r0', 'x'], 'two, of which one of the unlimited workflow');
+    equal(await claim(200), ['r1', 'r2'], 'the rest of the window: three in all');
+    equal(await claim(300), [], 'the window is full');
+    equal(await claim(1_099), [], 'until it ends');
+    equal(await claim(1_100), ['r3', 'r4', 'r5'], 'a new window opens at the first claim after it ended');
+    equal(await claim(2_099), [], 'and ends a duration later');
+    equal(await claim(2_100), ['r6'], 'the next one');
+  });
+
+  add('claim() under per-key rate limits keeps each key to its window, passes over a full key, and counts keyless instances only toward the workflow', async (t) => {
+    await t.prioritized('a1', 0, { rateLimitKey: 'customer-a' });
+    await t.prioritized('a2', 1, { rateLimitKey: 'customer-a' });
+    await t.prioritized('b1', 2, { rateLimitKey: 'customer-b' });
+    await t.prioritized('none', 3);
+    await t.prioritized('a3', 4, { rateLimitKey: 'customer-a' });
+    await t.prioritized('c1', 5, { rateLimitKey: 'customer-c' });
+    expect(await t.store.get('a1'), { rateLimitKey: 'customer-a' }, 'the key, stored');
+    const perKey = [{ workflow: W.name, limit: null, perKey: { max: 1, duration: 1_000 } }];
+
+    equal(await t.claimAndFinish(10, { rateLimits: perKey, limit: 3 }), ['a1', 'b1', 'none'], 'one per key, and the keyless one');
+    equal(await t.claimAndFinish(20, { rateLimits: perKey }), ['c1'], 'the next key with room');
+    equal(await t.claimAndFinish(30, { rateLimits: perKey }), [], "customer-a's window is full");
+    equal(await t.claimAndFinish(1_010, { rateLimits: perKey }), ['a2'], "customer-a's window reopens with its next instance");
+
+    // Both: the workflow's window counts every key's claims.
+    for (const [i, key] of ['d', 'd', 'e', 'f'].entries()) {
+      await t.prioritized(`${key}${i}`, 100 + i, { rateLimitKey: `customer-${key}` });
+    }
+    const both = [{ workflow: W.name, limit: { max: 2, duration: 1_000 }, perKey: { max: 1, duration: 1_000 } }];
+    equal(await t.claimAndFinish(5_000, { rateLimits: both }), ['a3', 'd0'], 'two in all, one per key');
+    equal(await t.claimAndFinish(5_500, { rateLimits: both }), [], 'the workflow window is full');
+    equal(await t.claimAndFinish(6_000, { rateLimits: both }), ['d1', 'e2'], 'the next window');
+  });
+
+  add('claim() applies rate limits and concurrency limits together, in stages', async (t) => {
+    const keys: Array<[string, string, string]> = [
+      ['i0', 'k0', 'r0'],
+      ['i1', 'k0', 'r1'],
+      ['i2', 'k1', 'r0'],
+      ['i3', 'k1', 'r1'],
+      ['i4', 'k2', 'r2'],
+    ];
+    for (const [n, [id, concurrencyKey, rateLimitKey]] of keys.entries()) {
+      await t.store.create({ id, workflow: W.name, version: 1, input: null, deadline: null, now: n, concurrencyKey, rateLimitKey });
+    }
+    const limits = [{ workflow: W.name, limit: 3, perKey: 1 }];
+    const rateLimits = [{ workflow: W.name, limit: { max: 4, duration: 1_000 }, perKey: { max: 1, duration: 1_000 } }];
+    const claim = (now: number) => t.claim(now, { limits, rateLimits, leaseUntil: now + 10 }).then((c) => c.instances.map((i) => i.id));
+
+    // k1 keeps i2, its first, which r0 then drops for i0: i3 would fit, but waits for the next claim.
+    equal(await t.claimAndFinish(10, { limits, rateLimits }), ['i0', 'i4'], 'in stages');
+    // i2 has no room at all (r0 is full): passed over. k0 keeps i1, k1 keeps i3, and r1 keeps i1, the first.
+    equal(await t.claimAndFinish(20, { limits, rateLimits }), ['i1'], 'a full rate key passed over');
+    equal(await t.claimAndFinish(30, { limits, rateLimits }), [], 'r0 and r1 are full');
+    equal(await claim(1_010), ['i2'], 'in the next windows, k1 keeps i2');
+    equal(await claim(1_015), [], "k1's slot is held by i2's live lease");
+    equal(await claim(1_021), ['i3'], "i2's lease ended, but its r0 window is full; i3 takes k1's slot");
+    equal(await t.claimAndFinish(1_030, { limits, rateLimits }), [], "i2 waits for r0's next window, at 2010");
   });
 
   add('claim() keeps a compensating instance compensating, and never claims a finished one', async (t) => {
@@ -478,18 +587,18 @@ export function workflowStoreContract(
     await t.store.write('parked', 'p', { now: 10, entries: [entry('wait', { kind: 'signal', status: 'pending' })], status: 'suspended', release: { wakeAt: null, waits: [{ signal: 's', key: 'k' }], signalCursor: 0 } });
 
     const statuses = ['completed', 'failed', 'cancelled'] as const;
-    equal(await t.store.purge({ statuses: [...statuses], before: 500, limit: 2 }), { instances: 2, signals: 0 }, 'the first batch');
+    equal(await t.store.purge({ statuses: [...statuses], before: 500, limit: 2 }), { instances: 2, signals: 0, rateLimits: 0 }, 'the first batch');
     equal(await t.store.get('done-1'), null, 'the oldest, gone');
     equal(await t.store.get('failed'), null, 'the next oldest, gone');
     expect(await t.store.get('done-2', { journal: true }), { status: 'completed', journal: [{ name: 'only' }] }, 'past the limit: kept');
 
-    equal(await t.store.purge({ statuses: [...statuses], before: 500, limit: 2 }), { instances: 1, signals: 0 }, 'the next batch');
-    equal(await t.store.purge({ statuses: [...statuses], before: 500, limit: 2 }), { instances: 0, signals: 0 }, 'nothing left');
+    equal(await t.store.purge({ statuses: [...statuses], before: 500, limit: 2 }), { instances: 1, signals: 0, rateLimits: 0 }, 'the next batch');
+    equal(await t.store.purge({ statuses: [...statuses], before: 500, limit: 2 }), { instances: 0, signals: 0, rateLimits: 0 }, 'nothing left');
     const left = (await t.store.list({ limit: 100, offset: 0 })).map((i) => i.id).sort();
     equal(left, ['parked', 'pending', 'recent', 'stuck'], 'unfinished, too recent, and another status: kept');
     expect(await t.store.get('parked', { journal: true }), { waits: [{ signal: 's', key: 'k' }], journal: [{ name: 'wait' }] }, 'an unfinished instance, untouched');
 
-    equal(await t.store.purge({ statuses: ['compensation_failed'], before: 500, limit: 10 }), { instances: 1, signals: 0 }, 'compensation_failed, when asked for');
+    equal(await t.store.purge({ statuses: ['compensation_failed'], before: 500, limit: 10 }), { instances: 1, signals: 0, rateLimits: 0 }, 'compensation_failed, when asked for');
     // A purged id can be started again.
     expect(await t.create('done-1'), { created: true, instance: { status: 'pending' } }, 'the id, free again');
   });
@@ -503,20 +612,35 @@ export function workflowStoreContract(
     const s4 = await send(4, 40);
     const all = () => t.store.signals({ name: 's', key: 'k', afterId: 0, upToId: FAR });
 
-    equal(await t.store.purge({ statuses: ['completed'], before: 1_000, limit: 1 }), { instances: 0, signals: 1 }, 'one at a time');
+    equal(await t.store.purge({ statuses: ['completed'], before: 1_000, limit: 1 }), { instances: 0, signals: 1, rateLimits: 0 }, 'one at a time');
     equal((await all()).map((s) => s.id), [s2.id, s3.id, s4.id], 'the lowest id first');
-    equal(await t.store.purge({ statuses: ['completed'], before: 1_000, limit: 10 }), { instances: 0, signals: 1 }, 'up to the cursor');
+    equal(await t.store.purge({ statuses: ['completed'], before: 1_000, limit: 10 }), { instances: 0, signals: 1, rateLimits: 0 }, 'up to the cursor');
     equal((await all()).map((s) => s.id), [s3.id, s4.id], "the signals an unfinished instance can still take: kept");
 
     await t.claim(0, { token: 't', leaseUntil: FAR });
     await t.store.write('waiting', 't', { now: 50, entries: [], status: 'completed', error: null, release: { wakeAt: null, waits: [], signalCursor: s4.id } });
-    equal(await t.store.purge({ statuses: ['completed'], before: 35, limit: 10 }), { instances: 0, signals: 1 }, 'only the old enough');
+    equal(await t.store.purge({ statuses: ['completed'], before: 35, limit: 10 }), { instances: 0, signals: 1, rateLimits: 0 }, 'only the old enough');
     equal((await all()).map((s) => s.id), [s4.id], 's3 is old enough, s4 too recent');
-    equal(await t.store.purge({ statuses: ['completed'], before: 1_000, limit: 10 }), { instances: 1, signals: 0 }, 'the newest stays');
+    equal(await t.store.purge({ statuses: ['completed'], before: 1_000, limit: 10 }), { instances: 1, signals: 0, rateLimits: 0 }, 'the newest stays');
     equal((await t.claim(0)).lastSignalId, s4.id, 'the last signal id');
     expect(await t.create('later'), { instance: { signalCursor: s4.id } }, "a new instance's cursor");
     expect(await send(5, 60), { created: true }, 'the next signal');
     expect(await send(1, 70, 'evt-1'), { created: true }, 'a dedupe id, stored again once its signal was purged');
+  });
+
+  add('purge() deletes the rate-limit windows that ended before `before`, oldest first, and keeps the open ones', async (t) => {
+    for (const key of ['a', 'b', 'c']) {
+      await t.prioritized(key, 0, { rateLimitKey: key });
+    }
+    const rateLimits = (duration: number) => [{ workflow: W.name, limit: null, perKey: { max: 1, duration } }];
+    await t.claim(10, { rateLimits: rateLimits(100), limit: 1, leaseUntil: 11 }); // a: window ends at 110
+    await t.claim(20, { rateLimits: rateLimits(50), limit: 1, leaseUntil: 21 }); // a is full; b: ends at 70
+    await t.claim(30, { rateLimits: rateLimits(5_000), limit: 1, leaseUntil: 31 }); // c: ends at 5030
+
+    equal(await t.store.purge({ statuses: ['completed'], before: 200, limit: 1 }), { instances: 0, signals: 0, rateLimits: 1 }, "b's, which ended first");
+    equal(await t.store.purge({ statuses: ['completed'], before: 200, limit: 10 }), { instances: 0, signals: 0, rateLimits: 1 }, "a's");
+    equal(await t.store.purge({ statuses: ['completed'], before: 200, limit: 10 }), { instances: 0, signals: 0, rateLimits: 0 }, "c's is open");
+    equal((await t.claim(40, { rateLimits: rateLimits(5_000), leaseUntil: 41 })).instances.map((i) => i.id), ['a', 'b'], 'the purged windows, as good as new');
   });
 
   // ---------------------------------------------------------------- cancel
@@ -776,6 +900,44 @@ export function workflowStoreContract(
         equal(leased.length, 4, `round ${round}: every slot filled, none more`);
         equal(new Set(leased.map((i) => i.concurrencyKey)).size, 4, `round ${round}: one per key`);
         await Promise.all(leased.map((i) => jitter().then(() => t.store.write(i.id, tokens.get(i.id)!, { now, entries: [], status: 'completed', error: null, release: { wakeAt: null, waits: [], signalCursor: 0 } }))));
+      }
+    });
+
+    add('concurrent claims never start more than a rate limit allows in a window, and fill its room', async (t) => {
+      for (let i = 0; i < 90; i++) {
+        await t.prioritized(`r${String(i).padStart(2, '0')}`, i, { rateLimitKey: `k${i % 3}` });
+      }
+
+      // Per key: 2 per window of 1000; overall: 5. Each round is a new window. Concurrent claims of one workflow
+      // may leave room (a claim passes over the instances another is taking): claims after them take the rest.
+      const rateLimits = [{ workflow: W.name, limit: { max: 5, duration: 1_000 }, perKey: { max: 2, duration: 1_000 } }];
+      const started = new Set<string>();
+      for (let round = 0; round < 5; round++) {
+        const now = 10_000 * (round + 1);
+        const claim = async (owner: string) => {
+          const token = randomUUID();
+          return (await t.claim(now, { owner, token, limit: 2, leaseUntil: now + 1, rateLimits })).instances.map((instance) => ({ instance, token }));
+        };
+        const claimed = (await Promise.all(['c1', 'c2', 'c3', 'c4', 'c5', 'c6'].map((owner) => jitter().then(() => claim(owner))))).flat();
+        for (let more = await claim('c7'); more.length > 0; more = await claim('c7')) {
+          claimed.push(...more);
+        }
+
+        equal(claimed.length, 5, `round ${round}: the window's room filled, no more`);
+        const perKey = new Map<string, number>();
+        for (const { instance } of claimed) {
+          perKey.set(instance.rateLimitKey!, (perKey.get(instance.rateLimitKey!) ?? 0) + 1);
+          if (started.has(instance.id)) {
+            throw new Error(`${instance.id} was claimed twice`);
+          }
+          started.add(instance.id);
+        }
+        equal([...perKey.values()].every((n) => n <= 2), true, `round ${round}: at most 2 per key`);
+        await Promise.all(
+          claimed.map(({ instance, token }) =>
+            t.store.write(instance.id, token, { now, entries: [], status: 'completed', error: null, release: { wakeAt: null, waits: [], signalCursor: 0 } }),
+          ),
+        );
       }
     });
 
@@ -1074,6 +1236,7 @@ class Harness {
       leaseUntil?: number;
       workflows?: Array<{ name: string; version: number }>;
       limits?: WorkflowConcurrencyLimit[];
+      rateLimits?: WorkflowRateLimitRule[];
     } = {},
   ): Promise<WorkflowClaim> {
     return this.store.claim({
@@ -1084,7 +1247,23 @@ class Harness {
       limit: o.limit ?? 100,
       workflows: o.workflows ?? [W],
       ...(o.limits ? { limits: o.limits } : {}),
+      ...(o.rateLimits ? { rateLimits: o.rateLimits } : {}),
     });
+  }
+
+  /** Claims at `now` and finishes what it claimed (so nothing comes back when its lease ends); returns the ids. */
+  async claimAndFinish(now: number, o: Parameters<Harness['claim']>[1] = {}): Promise<string[]> {
+    const token = randomUUID();
+    const { instances } = await this.claim(now, { ...o, token });
+    for (const instance of instances) {
+      await this.store.write(instance.id, token, { now, entries: [], status: 'completed', error: null, release: { wakeAt: null, waits: [], signalCursor: 0 } });
+    }
+    return instances.map((instance) => instance.id);
+  }
+
+  /** An instance of `W` with a priority and a rate-limit key. */
+  prioritized(id: string, now: number, o: { priority?: number; rateLimitKey?: string | null } = {}) {
+    return this.store.create({ id, workflow: W.name, version: 1, input: { id }, deadline: null, now, ...o });
   }
 
   /** An instance of `W` with a concurrency key. */

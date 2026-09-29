@@ -55,6 +55,8 @@ export class InMemoryWorkflowStore implements WorkflowStore {
   private static readonly logger = new Logger('WorkflowsModule');
   private readonly rows = new Map<string, Row>();
   private readonly signalLog: Array<WorkflowSignalRecord & { dedupeId: string | null }> = [];
+  /** Rate-limit windows by `JSON.stringify([workflow])` or `JSON.stringify([workflow, key])`. */
+  private readonly windows = new Map<string, { windowEnd: number; count: number }>();
   private warnedAboutTransactions = false;
 
   /** `create()`, at once: it can't join `transaction` (see the class). */
@@ -95,6 +97,8 @@ export class InMemoryWorkflowStore implements WorkflowStore {
       parentId: i.parentId ?? null,
       parentClose: i.parentClose ?? null,
       concurrencyKey: i.concurrencyKey ?? null,
+      rateLimitKey: i.rateLimitKey ?? null,
+      priority: i.priority ?? 0,
       status: 'pending',
       input: copy(i.input),
       output: undefined,
@@ -252,7 +256,15 @@ export class InMemoryWorkflowStore implements WorkflowStore {
     const kept = this.signalLog.filter((s) => !prunable.has(s.id));
     this.signalLog.splice(0, this.signalLog.length, ...kept);
 
-    return { instances: finished.length, signals: prunable.size };
+    const ended = [...this.windows]
+      .filter(([, window]) => window.windowEnd < query.before)
+      .sort(([a, x], [b, y]) => x.windowEnd - y.windowEnd || compare(a, b))
+      .slice(0, query.limit);
+    for (const [key] of ended) {
+      this.windows.delete(key);
+    }
+
+    return { instances: finished.length, signals: prunable.size, rateLimits: ended.length };
   }
 
   async claim(request: WorkflowClaimRequest): Promise<WorkflowClaim> {
@@ -266,18 +278,16 @@ export class InMemoryWorkflowStore implements WorkflowStore {
           (i.leaseUntil === null || i.leaseUntil < request.now) &&
           runs.has(`${i.version}:${i.workflow}`),
       )
-      .sort((a, b) => a.instance.wakeAt! - b.instance.wakeAt! || a.instance.createdAt - b.instance.createdAt || compare(a.instance.id, b.instance.id));
+      .sort(
+        (a, b) =>
+          a.instance.priority - b.instance.priority ||
+          a.instance.wakeAt! - b.instance.wakeAt! ||
+          a.instance.createdAt - b.instance.createdAt ||
+          compare(a.instance.id, b.instance.id),
+      );
 
-    const slots = this.slots(request);
-    const due: Row[] = [];
-    for (const row of candidates) {
-      if (due.length === request.limit) {
-        break;
-      }
-      if (slots.take(row.instance)) {
-        due.push(row);
-      }
-    }
+    const due = this.pick(request, candidates);
+    this.recordWindows(request, due);
 
     for (const row of due) {
       const i = row.instance;
@@ -294,33 +304,72 @@ export class InMemoryWorkflowStore implements WorkflowStore {
     return { instances: due.map((row) => copy(row.instance)), lastSignalId: this.lastSignalId() };
   }
 
-  /** Counts the slots of `request.limits` that live leases hold; `take()` claims one if the instance's limits have room. */
-  private slots(request: WorkflowClaimRequest): { take(instance: WorkflowInstance): boolean } {
+  /**
+   * The staged pick of `WorkflowStore.claim()` under limits: candidates with no room at all are passed over first;
+   * then each concurrency key keeps its first candidates, as many as it has free slots; of those, each rate-limit
+   * key as many as its window has room for; of those, each workflow as many as both its free slots and its window
+   * allow; then the first `limit`.
+   */
+  private pick(request: WorkflowClaimRequest, candidates: Row[]): Row[] {
     const limits = new Map((request.limits ?? []).map((limit) => [limit.workflow, limit]));
+    const rules = new Map((request.rateLimits ?? []).map((rule) => [rule.workflow, rule]));
     const held = new Map<string, number>();
-    const count = (key: string) => held.set(key, (held.get(key) ?? 0) + 1);
-    const keys = (i: WorkflowInstance) => [JSON.stringify([i.workflow]), ...(i.concurrencyKey === null ? [] : [JSON.stringify([i.workflow, i.concurrencyKey])])];
     for (const { instance: i } of this.rows.values()) {
       if (limits.has(i.workflow) && i.leaseUntil !== null && i.leaseUntil >= request.now) {
-        keys(i).forEach(count);
+        for (const key of [slot(i.workflow), ...(i.concurrencyKey === null ? [] : [slot(i.workflow, i.concurrencyKey)])]) {
+          held.set(key, (held.get(key) ?? 0) + 1);
+        }
       }
     }
 
-    return {
-      take: (i) => {
-        const limit = limits.get(i.workflow);
-        if (!limit) {
-          return true;
-        }
-
-        const [workflow, key] = keys(i);
-        if ((limit.limit !== null && (held.get(workflow!) ?? 0) >= limit.limit) || (limit.perKey !== null && key !== undefined && (held.get(key) ?? 0) >= limit.perKey)) {
-          return false;
-        }
-        keys(i).forEach(count);
-        return true;
-      },
+    const heldBy = (key: string) => held.get(key) ?? 0;
+    const usedBy = (key: string) => this.openWindow(key, request.now)?.count ?? 0;
+    const free = (i: WorkflowInstance) => {
+      const limit = limits.get(i.workflow);
+      const rule = rules.get(i.workflow);
+      return {
+        total: limit?.limit != null ? limit.limit - heldBy(slot(i.workflow)) : Infinity,
+        key: limit?.perKey != null && i.concurrencyKey !== null ? limit.perKey - heldBy(slot(i.workflow, i.concurrencyKey)) : Infinity,
+        rate: rule?.limit ? rule.limit.max - usedBy(slot(i.workflow)) : Infinity,
+        rateKey: rule?.perKey && i.rateLimitKey !== null ? rule.perKey.max - usedBy(slot(i.workflow, i.rateLimitKey)) : Infinity,
+      };
     };
+
+    const open = candidates.filter(({ instance: i }) => Object.values(free(i)).every((room) => room > 0));
+    const byKey = firsts(open, (i) => (Number.isFinite(free(i).key) ? slot(i.workflow, i.concurrencyKey!) : null), (i) => free(i).key);
+    const byRateKey = firsts(byKey, (i) => (Number.isFinite(free(i).rateKey) ? slot(i.workflow, i.rateLimitKey!) : null), (i) => free(i).rateKey);
+    const byWorkflow = firsts(
+      byRateKey,
+      (i) => (limits.has(i.workflow) || rules.has(i.workflow) ? i.workflow : null),
+      (i) => Math.min(free(i).total, free(i).rate),
+    );
+    return byWorkflow.slice(0, request.limit);
+  }
+
+  /** Records the claims of `claimed` in their rate-limit windows, starting a window where the last one ended. */
+  private recordWindows(request: WorkflowClaimRequest, claimed: Row[]): void {
+    const rules = new Map((request.rateLimits ?? []).map((rule) => [rule.workflow, rule]));
+    for (const { instance: i } of claimed) {
+      const rule = rules.get(i.workflow);
+      const windows = [
+        ...(rule?.limit ? [{ key: slot(i.workflow), duration: rule.limit.duration }] : []),
+        ...(rule?.perKey && i.rateLimitKey !== null ? [{ key: slot(i.workflow, i.rateLimitKey), duration: rule.perKey.duration }] : []),
+      ];
+      for (const { key, duration } of windows) {
+        const window = this.openWindow(key, request.now);
+        if (window) {
+          window.count++;
+        } else {
+          this.windows.set(key, { windowEnd: request.now + duration, count: 1 });
+        }
+      }
+    }
+  }
+
+  /** The window under `key` if it is still open at `now`. */
+  private openWindow(key: string, now: number): { windowEnd: number; count: number } | undefined {
+    const window = this.windows.get(key);
+    return window && window.windowEnd > now ? window : undefined;
   }
 
   async renew(id: string, token: string, leaseUntil: number): Promise<{ cancelRequested: boolean; terminateRequested: boolean } | null> {
@@ -392,4 +441,24 @@ function copy<T>(value: T): T {
 
 function compare(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/** A workflow's slot or window key, or one of its keys'. */
+function slot(workflow: string, key?: string): string {
+  return JSON.stringify(key === undefined ? [workflow] : [workflow, key]);
+}
+
+/** Of `rows` (in order), each partition's first ones, as many as `room` says; rows in no partition (`null`) all stay. */
+function firsts(rows: Row[], partition: (instance: WorkflowInstance) => string | null, room: (instance: WorkflowInstance) => number): Row[] {
+  const seen = new Map<string, number>();
+  return rows.filter(({ instance }) => {
+    const key = partition(instance);
+    if (key === null) {
+      return true;
+    }
+
+    const n = (seen.get(key) ?? 0) + 1;
+    seen.set(key, n);
+    return n <= room(instance);
+  });
 }

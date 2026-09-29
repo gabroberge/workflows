@@ -601,6 +601,8 @@ export class WorkflowExecution {
       now: this.deps.clock.now(),
       timeout: options.timeout,
       concurrencyKey: options.concurrencyKey,
+      rateLimitKey: options.rateLimitKey,
+      priority: options.priority ?? this.instance.priority,
       parentId: this.instance.id,
       parentClose,
     });

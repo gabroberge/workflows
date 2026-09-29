@@ -363,14 +363,14 @@ describe('purge()', () => {
     await node.worker.drain();
     await node.client.signal('unheard', 2);
 
-    expect(await node.client.purge({ olderThan: '30d', batchSize: 2 })).toEqual({ instances: 3, signals: 0 });
+    expect(await node.client.purge({ olderThan: '30d', batchSize: 2 })).toEqual({ instances: 3, signals: 0, rateLimits: 0 });
     expect((await node.client.list()).map((i) => i.id)).toEqual(['listening', 'recent']);
 
     // Once the listener is gone too, its signals go, except the newest.
     await node.client.cancel('listening');
     await node.worker.drain();
     clock.advance('31d');
-    expect(await node.client.purge({ olderThan: '30d' })).toEqual({ instances: 2, signals: 2 });
+    expect(await node.client.purge({ olderThan: '30d' })).toEqual({ instances: 2, signals: 2, rateLimits: 0 });
     expect(await node.store.signals({ name: 'unheard', key: null, afterId: 0, upToId: Number.MAX_SAFE_INTEGER })).toMatchObject([{ payload: 2 }]);
     expect(await node.client.list()).toEqual([]);
   });
@@ -382,8 +382,8 @@ describe('purge()', () => {
     await node.store.write(claimed!.id, 't', { now: clock.now(), entries: [], status: 'compensation_failed', error: { name: 'Error', message: 'x' }, release: { wakeAt: null, waits: [], signalCursor: 0 } });
     clock.advance('1d');
 
-    expect(await node.client.purge({ olderThan: '1h' })).toEqual({ instances: 0, signals: 0 });
-    expect(await node.client.purge({ olderThan: '1h', status: 'compensation_failed' })).toEqual({ instances: 1, signals: 0 });
+    expect(await node.client.purge({ olderThan: '1h' })).toEqual({ instances: 0, signals: 0, rateLimits: 0 });
+    expect(await node.client.purge({ olderThan: '1h', status: 'compensation_failed' })).toEqual({ instances: 1, signals: 0, rateLimits: 0 });
 
     await expect(node.client.purge({ olderThan: '1h', status: ['completed', 'running'] })).rejects.toThrow(
       new TypeError('purge(): status must list finished statuses (completed, failed, cancelled, compensation_failed), not running. Cancel an unfinished instance first.'),

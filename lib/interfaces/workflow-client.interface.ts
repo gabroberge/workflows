@@ -30,6 +30,17 @@ export interface StartWorkflowOptions {
    */
   concurrencyKey?: string;
   /**
+   * The key the workflow's per-key rate limit counts the instance under, instead of the one its
+   * `rateLimit.key` computes. Needs a rate limit with a `key`.
+   */
+  rateLimitKey?: string;
+  /**
+   * Lower runs first: an integer from 1 to 2,097,151. Due instances are claimed by priority, then most
+   * overdue first; instances without one go before every prioritized one. The instance keeps it for every
+   * execution (each resumption waits its turn by it), and its children inherit it. Default: none.
+   */
+  priority?: number;
+  /**
    * Your ORM's transaction: the `tx` (or `EntityManager`, `Transaction`...) your transaction
    * callback receives. The instance is created in it, so it exists if and only if your
    * transaction commits, together with the rows you wrote. The worker picks it up after the
@@ -119,8 +130,9 @@ export interface WorkflowPurgeOptions {
   /**
    * How long finished instances are kept, such as `'30d'`: instances that finished longer ago
    * go, with their journals, and so do signals older than this that no unfinished instance can
-   * take. A signal's `id` deduplicates until its signal is purged, so keep this longer than any
-   * sender's redelivery window, and longer than your longest transaction.
+   * take, and rate-limit windows that ended that long ago. A signal's `id` deduplicates until its
+   * signal is purged, so keep this longer than any sender's redelivery window, and longer than
+   * your longest transaction.
    */
   olderThan: Duration;
   /**

@@ -1,4 +1,5 @@
 import type { SerializedWorkflowError } from './serialized-workflow-error.interface.js';
+import type { WorkflowRateWindow } from './workflow-decorator-options.interface.js';
 import type {
   WorkflowInstance,
   WorkflowJournalEntry,
@@ -123,32 +124,49 @@ export interface WorkflowStore {
    * last signal id. So a signal can go when its id is at or below the lowest `signalCursor` of
    * the unfinished instances (`pending`, `running`, `suspended`, `compensating`), its
    * `createdAt` is below `before` (its `dedupeId` keeps deduplicating until then), and it isn't
-   * the newest signal (which keeps the last signal id from going back). Returns how many
-   * instances and signals it deleted. Each delete is one statement; nothing else is atomic.
+   * the newest signal (which keeps the last signal id from going back).
+   *
+   * And deletes up to `limit` rate-limit windows (see `claim()`) that ended before `before`: a window that
+   * ended is the same as none. Re-check `windowEnd` on the rows it deletes, as for instances: a claim may
+   * have started a new window in one meanwhile. Returns how many instances, signals and windows it
+   * deleted. Each delete is one statement; nothing else is atomic.
    */
   purge(query: WorkflowPurgeQuery): Promise<WorkflowPurgeResult>;
 
   // ---------------------------------------------------------------- the worker
 
   /**
-   * Leases up to `limit` due instances to a worker, most overdue first. Due: status `pending`,
-   * `running`, `suspended` or `compensating`, `wakeAt <= now`, no lease or an expired one
-   * (`leaseUntil < now`), and a `workflow`/`version` pair in `workflows`. Each claimed instance
-   * gets `leaseToken = token`, `leaseOwner = owner`, `leaseUntil`, `runs + 1`,
-   * `updatedAt = now` and status `running` (a `compensating` one keeps its status).
+   * Leases up to `limit` due instances to a worker: lowest `priority` first, then most overdue (`wakeAt`),
+   * then `createdAt`, then `id`. Due: status `pending`, `running`, `suspended` or `compensating`,
+   * `wakeAt <= now`, no lease or an expired one (`leaseUntil < now`), and a `workflow`/`version` pair in
+   * `workflows`. Each claimed instance gets `leaseToken = token`, `leaseOwner = owner`, `leaseUntil`,
+   * `runs + 1`, `updatedAt = now` and status `running` (a `compensating` one keeps its status).
    *
    * Two concurrent claims must never return the same instance: lock the candidates and skip
    * those another claim holds (`FOR UPDATE SKIP LOCKED`). Also returns the last signal id,
    * read after the claim, as the execution's signal cursor.
    *
-   * `limits`: an instance holds a slot while its lease is live (`leaseUntil >= now`). Claim no
-   * instance of a listed workflow (any version) that would make more than `limit` of its
-   * instances hold a slot, or more than `perKey` of those with its `concurrencyKey` (instances
-   * without one count only toward `limit`). Pass over the candidates a full limit holds back
-   * and keep looking, so one busy key never holds back the others, taking each key's candidates
-   * in the usual order. Claims of a limited workflow must count and lease as one step: take a
-   * transaction-scoped lock per limited workflow name, in a fixed order, then count, so two
-   * claims never both take the last free slot.
+   * `limits`: an instance holds a slot while its lease is live (`leaseUntil >= now`): at most `limit` of a
+   * listed workflow's instances (any version) hold one, and at most `perKey` of those with the same
+   * `concurrencyKey` (instances without one count only toward `limit`).
+   *
+   * `rateLimits`: each claim of an instance of a listed workflow starts an execution, which takes room in its
+   * workflow's windows: `limit` (the workflow's own) and `perKey` (one per `rateLimitKey`; instances without one
+   * count only toward `limit`). A window holds at most `max` claims; it starts with the first claim after the
+   * previous one ended (`windowEnd <= now`) and ends `duration` later.
+   *
+   * Under limits, take the candidates (in the order above) in stages, so one busy key never holds back the
+   * others: pass over every candidate with no room at all (a full slot count or window of its workflow or its
+   * key); then keep each concurrency key's first candidates, as many as it has free slots; of those, each rate
+   * key's first, as many as its window has room for; of those, each workflow's first, as many as both its free
+   * slots and its window allow; then the first `limit`. (With both kinds of keys, a claim can take fewer than
+   * fit: a key's candidate dropped by the other kind of key isn't replaced until the next claim.)
+   *
+   * Count and lease as one step, so two claims never take the last room: take a transaction-scoped lock per
+   * workflow with concurrency limits, in a fixed order, before counting; and lock each rate-limit window the
+   * picked instances take room in (an insert-or-lock of its row, in a fixed order, so there is always a row to
+   * lock), re-count under the lock, and lease only what still fits. Claims that take no room in a window never
+   * wait for its lock.
    */
   claim(request: WorkflowClaimRequest): Promise<WorkflowClaim>;
   /**
@@ -187,6 +205,10 @@ export interface NewWorkflowInstance {
   parentClose?: WorkflowParentClose | null;
   /** Stored as `concurrencyKey`: the key its workflow's per-key limit counts it under. Absent: `null`. */
   concurrencyKey?: string | null;
+  /** Stored as `rateLimitKey`: the key its workflow's per-key rate limit counts it under. Absent: `null`. */
+  rateLimitKey?: string | null;
+  /** Stored as `priority`: lower is claimed first. Absent: `0`, which goes before every other priority. */
+  priority?: number;
   /** The instance's `deadline`: when its run timeout passes, or `null`. Stored as is. */
   deadline: number | null;
   /**
@@ -262,14 +284,16 @@ export interface WorkflowPurgeQuery {
   statuses: WorkflowStatus[];
   /** Instances whose `updatedAt` (when they finished), and signals whose `createdAt`, is below this. */
   before: number;
-  /** At least 1: the most instances, and the most signals, one call deletes. */
+  /** At least 1: the most instances, the most signals, and the most rate-limit windows one call deletes. */
   limit: number;
 }
 
-/** How many instances and signals a purge deleted. */
+/** How many instances, signals and rate-limit windows a purge deleted. */
 export interface WorkflowPurgeResult {
   instances: number;
   signals: number;
+  /** Rate-limit windows that had ended. */
+  rateLimits: number;
 }
 
 export interface WorkflowSignalQuery {
@@ -302,6 +326,17 @@ export interface WorkflowClaimRequest {
   workflows: Array<{ name: string; version: number }>;
   /** Concurrency limits of some of those workflows (by name, every version). Absent or empty: none. */
   limits?: WorkflowConcurrencyLimit[];
+  /** Rate limits of some of those workflows (by name, every version). Absent or empty: none. */
+  rateLimits?: WorkflowRateLimitRule[];
+}
+
+/** A workflow's rate limits, as a claim applies them: at most `max` claims per window of `duration` ms. */
+export interface WorkflowRateLimitRule {
+  workflow: string;
+  /** The workflow's own window (every instance counts), or `null`. */
+  limit: WorkflowRateWindow | null;
+  /** One window per non-null `rateLimitKey`, or `null`. */
+  perKey: WorkflowRateWindow | null;
 }
 
 /** A workflow's concurrency limits, as a claim applies them. */

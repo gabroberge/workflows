@@ -5,6 +5,8 @@ CREATE TABLE "workflow_instances" (
 	"parent_id" text,
 	"parent_close" text,
 	"concurrency_key" text,
+	"rate_limit_key" text,
+	"priority" integer DEFAULT 0 NOT NULL,
 	"status" text NOT NULL,
 	"input" jsonb,
 	"output" jsonb,
@@ -32,6 +34,14 @@ CREATE TABLE "workflow_journal" (
 	CONSTRAINT "workflow_journal_name" UNIQUE("instance_id","name")
 );
 --> statement-breakpoint
+CREATE TABLE "workflow_rate_limits" (
+	"workflow" text NOT NULL,
+	"key" text NOT NULL,
+	"window_end" bigint NOT NULL,
+	"count" integer NOT NULL,
+	CONSTRAINT "workflow_rate_limits_workflow_key_pk" PRIMARY KEY("workflow","key")
+);
+--> statement-breakpoint
 CREATE TABLE "workflow_signals" (
 	"id" bigint PRIMARY KEY GENERATED ALWAYS AS IDENTITY (sequence name "workflow_signals_id_seq" INCREMENT BY 1 MINVALUE 1 MAXVALUE 9223372036854775807 START WITH 1 CACHE 1),
 	"name" text NOT NULL,
@@ -57,5 +67,6 @@ CREATE INDEX "workflow_instances_created" ON "workflow_instances" USING btree ("
 CREATE INDEX "workflow_instances_status" ON "workflow_instances" USING btree ("status","updated_at");--> statement-breakpoint
 CREATE INDEX "workflow_instances_leased" ON "workflow_instances" USING btree ("workflow","concurrency_key") WHERE "workflow_instances"."lease_until" IS NOT NULL;--> statement-breakpoint
 CREATE INDEX "workflow_instances_parent" ON "workflow_instances" USING btree ("parent_id","created_at") WHERE "workflow_instances"."parent_id" IS NOT NULL;--> statement-breakpoint
+CREATE INDEX "workflow_rate_limits_end" ON "workflow_rate_limits" USING btree ("window_end");--> statement-breakpoint
 CREATE INDEX "workflow_signals_lookup" ON "workflow_signals" USING btree ("name","key","id");--> statement-breakpoint
 CREATE INDEX "workflow_waits_signal" ON "workflow_waits" USING btree ("signal","key");

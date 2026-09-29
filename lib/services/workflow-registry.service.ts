@@ -3,7 +3,7 @@ import { DiscoveryService } from '@nestjs/core';
 import { WorkflowNotFoundError } from '../errors/workflow-not-found.error.js';
 import type { WorkflowRunner } from '../interfaces/workflow-runner.interface.js';
 import type { WorkflowMetadata } from '../interfaces/workflow-decorator-options.interface.js';
-import type { WorkflowConcurrencyLimit } from '../interfaces/workflow-store.interface.js';
+import type { WorkflowConcurrencyLimit, WorkflowRateLimitRule } from '../interfaces/workflow-store.interface.js';
 import { WORKFLOW_EVENT_ROUTES_METADATA, WORKFLOW_METADATA } from '../workflows.constants.js';
 
 export interface WorkflowDefinition extends WorkflowMetadata {
@@ -40,11 +40,23 @@ export class WorkflowRegistry {
 
   /** The concurrency limits of the workflows this process runs, for claims: each name's highest registered version's. */
   limits(): WorkflowConcurrencyLimit[] {
-    const names = new Set([...this.load().values()].map((def) => def.name));
-    return [...names].flatMap((name) => {
+    return this.names().flatMap((name) => {
       const concurrency = this.latest(name)!.concurrency;
       return concurrency ? [{ workflow: name, limit: concurrency.limit, perKey: concurrency.perKey }] : [];
     });
+  }
+
+  /** The rate limits of the workflows this process runs, for claims: each name's highest registered version's. */
+  rateLimits(): WorkflowRateLimitRule[] {
+    return this.names().flatMap((name) => {
+      const rateLimit = this.latest(name)!.rateLimit;
+      return rateLimit ? [{ workflow: name, limit: rateLimit.limit, perKey: rateLimit.perKey }] : [];
+    });
+  }
+
+  /** The workflow names this process registers. */
+  names(): string[] {
+    return [...new Set([...this.load().values()].map((def) => def.name))];
   }
 
   [ROUTE_EVENTS](): void {
@@ -93,16 +105,23 @@ export class WorkflowRegistry {
         throw new TypeError(`Invalid version ${version} for workflow "${name}". Use a positive integer.`);
       }
       const known = this.get(name, version) ?? (fallback?.version === version ? fallback : undefined);
-      return { name, version, timeout: known?.timeout, concurrency: this.latest(name)?.concurrency ?? fallback?.concurrency ?? known?.concurrency };
+      const latest = this.latest(name);
+      return {
+        name,
+        version,
+        timeout: known?.timeout,
+        concurrency: latest?.concurrency ?? fallback?.concurrency ?? known?.concurrency,
+        rateLimit: latest?.rateLimit ?? fallback?.rateLimit ?? known?.rateLimit,
+      };
     }
 
     const def = this.latest(name);
     if (def) {
-      return { name: def.name, version: def.version, timeout: def.timeout, concurrency: def.concurrency };
+      return { name: def.name, version: def.version, timeout: def.timeout, concurrency: def.concurrency, rateLimit: def.rateLimit };
     }
 
     if (fallback !== undefined) {
-      return { name, version: fallback.version, timeout: fallback.timeout, concurrency: fallback.concurrency };
+      return { name, version: fallback.version, timeout: fallback.timeout, concurrency: fallback.concurrency, rateLimit: fallback.rateLimit };
     }
     throw new WorkflowNotFoundError(
       `Workflow "${name}" is not registered in this application. Register it, or pass { version } to start it from a process that does not run it.`,

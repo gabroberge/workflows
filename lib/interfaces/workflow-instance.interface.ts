@@ -23,6 +23,10 @@ export interface WorkflowInstance {
   parentClose: WorkflowParentClose | null;
   /** The key its workflow's per-key concurrency limit counts it under, or `null`. */
   concurrencyKey: string | null;
+  /** The key its workflow's per-key rate limit counts it under, or `null`. */
+  rateLimitKey: string | null;
+  /** Lower is claimed first; `0` (none given) before every other. */
+  priority: number;
   status: WorkflowStatus;
   input: unknown;
   output?: unknown;

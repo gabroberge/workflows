@@ -136,7 +136,7 @@ describe.each(adapters)('a scheduled job that starts workflows on one pod ($name
     await a.http('POST', '/admin/jobs/nightly-invoices/2026-02-01');
     await a.worker.drain();
 
-    expect((await a.http('POST', '/admin/jobs/workflow-retention')).body).toEqual({ ran: true, instances: 1, signals: 0 });
+    expect((await a.http('POST', '/admin/jobs/workflow-retention')).body).toEqual({ ran: true, instances: 1, signals: 0, rateLimits: 0 });
     expect((await b.http('POST', '/admin/jobs/workflow-retention')).body).toEqual({ ran: false });
     expect((await a.client.list()).map((instance) => instance.id)).toEqual(['invoices-2026-02-01']);
   });

@@ -70,7 +70,14 @@ export class WorkflowClient {
     const resolved = this.registry.resolve(workflow as Type<unknown> | string, options.version);
     const derived = options.id === undefined ? stepStartId(resolved.name) : undefined;
     const id = options.id ?? derived ?? randomUUID();
-    const data = newInstance(resolved, id, input, { caller: 'start()', now: this.clock.now(), timeout: options.timeout, concurrencyKey: options.concurrencyKey });
+    const data = newInstance(resolved, id, input, {
+      caller: 'start()',
+      now: this.clock.now(),
+      timeout: options.timeout,
+      concurrencyKey: options.concurrencyKey,
+      rateLimitKey: options.rateLimitKey,
+      priority: options.priority,
+    });
     // Nothing is awaited before the store's call: on a driver whose transactions are
     // synchronous, its statements must run before the application's transaction callback returns.
     const { instance, created } = await (options.transaction === undefined
@@ -428,9 +435,10 @@ export class WorkflowClient {
   }
 
   /**
-   * Deletes finished instances older than `olderThan`, with their journals, and the signals no
-   * unfinished instance can take any more, in batches until none is left. Returns how many of
-   * each it deleted. Run it from a scheduled job; concurrent runs are safe, only wasteful.
+   * Deletes finished instances older than `olderThan`, with their journals, the signals no
+   * unfinished instance can take any more, and the rate-limit windows that ended before it, in
+   * batches until none is left. Returns how many of each it deleted. Run it from a scheduled job;
+   * concurrent runs are safe, only wasteful.
    */
   async purge(options: WorkflowPurgeOptions): Promise<WorkflowPurgeResult> {
     const olderThan = toMs(options.olderThan);
@@ -448,12 +456,13 @@ export class WorkflowClient {
     }
 
     const before = this.clock.now() - olderThan;
-    const total = { instances: 0, signals: 0 };
+    const total = { instances: 0, signals: 0, rateLimits: 0 };
     for (;;) {
       const batch = await this.store.purge({ statuses, before, limit });
       total.instances += batch.instances;
       total.signals += batch.signals;
-      if (batch.instances < limit && batch.signals < limit) {
+      total.rateLimits += batch.rateLimits;
+      if (batch.instances < limit && batch.signals < limit && batch.rateLimits < limit) {
         return total;
       }
     }
