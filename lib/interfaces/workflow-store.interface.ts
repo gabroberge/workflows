@@ -129,8 +129,9 @@ export interface WorkflowStore {
    *
    * And deletes up to `limit` rate-limit windows (see `claim()`) that ended before `before`: a window that
    * ended is the same as none. Re-check `windowEnd` on the rows it deletes, as for instances: a claim may
-   * have started a new window in one meanwhile. Returns how many instances, signals and windows it
-   * deleted. Each delete is one statement; nothing else is atomic.
+   * have started a new window in one meanwhile; and pass over the windows a claim is locking (`SKIP
+   * LOCKED`) rather than wait for them, since claims lock them in another order. Returns how many
+   * instances, signals and windows it deleted. Each delete is one statement; nothing else is atomic.
    */
   purge(query: WorkflowPurgeQuery): Promise<WorkflowPurgeResult>;
 

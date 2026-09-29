@@ -207,14 +207,16 @@ export class DrizzleWorkflowStore implements WorkflowStore {
       .limit(query.limit);
     const pruned = await this.db.delete(signals).where(inArray(signals.id, prunable)).returning({ id: signals.id });
 
-    // Rate-limit windows that ended: again on the deleted rows, as a claim may have opened a new one meanwhile.
+    // Rate-limit windows that ended: again on the deleted rows, as a claim may have opened a new one meanwhile. Rows a
+    // claim is locking are skipped: waiting for them, in another order than the claim's, could deadlock.
     const ended = lt(rateLimits.windowEnd, query.before);
     const oldestWindows = this.db
       .select({ workflow: rateLimits.workflow, key: rateLimits.key })
       .from(rateLimits)
       .where(ended)
       .orderBy(asc(rateLimits.windowEnd), asc(rateLimits.workflow), asc(rateLimits.key))
-      .limit(query.limit);
+      .limit(query.limit)
+      .for('update', { skipLocked: true });
     const windows = await this.db
       .delete(rateLimits)
       .where(and(sql`(${rateLimits.workflow}, ${rateLimits.key}) IN ${oldestWindows}`, ended))

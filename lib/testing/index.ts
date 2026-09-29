@@ -1081,6 +1081,37 @@ export function workflowStoreContract(
       equal(inserts.filter((saved) => saved !== null).length, 1, 'one insert');
     });
 
+    add('purge() racing claims that reuse ended rate-limit windows neither deadlocks nor lets a window overflow', async (t) => {
+      for (let i = 0; i < 40; i++) {
+        await t.prioritized(`w${String(i).padStart(2, '0')}`, i, { rateLimitKey: `k${i % 8}` });
+      }
+
+      // Every round's windows (500ms) have ended by the next round, when purges delete them (in the order they ended,
+      // not by key, as the claimers open them a millisecond apart) while claims reuse them (by key).
+      const rateLimits = [{ workflow: W.name, limit: null, perKey: { max: 1, duration: 500 } }];
+      for (let round = 0; round < 5; round++) {
+        const now = 1_000 * (round + 1);
+        const claims = ['c1', 'c2', 'c3', 'c4'].map(async (owner, i) => {
+          const token = randomUUID();
+          await jitter();
+          return (await t.claim(now + i, { owner, token, limit: 3, leaseUntil: now + 10, rateLimits })).instances.map((instance) => ({ instance, token }));
+        });
+        const purges = [1, 2].map(async () => {
+          await jitter();
+          return t.store.purge({ statuses: ['completed'], before: now, limit: 2 });
+        });
+        const claimed = (await Promise.all([...claims, ...purges.map((purge) => purge.then(() => []))])).flat();
+
+        const keys = claimed.map(({ instance }) => instance.rateLimitKey);
+        equal(new Set(keys).size, keys.length, `round ${round}: at most one per key's window`);
+        await Promise.all(
+          claimed.map(({ instance, token }) =>
+            t.store.write(instance.id, token, { now, entries: [], status: 'completed', error: null, release: { wakeAt: null, waits: [], signalCursor: 0 } }),
+          ),
+        );
+      }
+    });
+
     add('a signal racing a suspension never loses the wake-up', async (t) => {
       const n = 60;
       for (let i = 0; i < n; i++) {

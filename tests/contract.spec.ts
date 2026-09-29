@@ -185,6 +185,7 @@ if (storeKind === 'memory') {
         'claim() applies rate limits and concurrency limits together, in stages',
         'purge() deletes the rate-limit windows that ended before `before`, oldest first, and keeps the open ones',
         'concurrent claims never start more than a rate limit allows in a window, and fill its room',
+        'purge() racing claims that reuse ended rate-limit windows neither deadlocks nor lets a window overflow',
       ]);
       expect(await failures(() => new NoPriority())).toEqual([
         'claim() takes the lowest priority first (none before any), then the most overdue, with or without limits',
