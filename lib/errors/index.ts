@@ -1,3 +1,4 @@
+export * from './child-workflow-failed.error.js';
 export * from './non-retryable-step.error.js';
 export * from './step-failed.error.js';
 export * from './step-timeout.error.js';

@@ -86,6 +86,7 @@ export class DrizzleWorkflowStore implements WorkflowStore {
           query.status ? inArray(instances.status, query.status) : undefined,
           query.workflow !== undefined ? eq(instances.workflow, query.workflow) : undefined,
           query.version !== undefined ? eq(instances.version, query.version) : undefined,
+          query.parentId !== undefined ? eq(instances.parentId, query.parentId) : undefined,
         ),
       )
       .orderBy(asc(instances.createdAt), asc(instances.id))
@@ -245,7 +246,9 @@ export class DrizzleWorkflowStore implements WorkflowStore {
   write(id: string, token: string, write: WorkflowWrite): Promise<boolean> {
     return this.db.transaction(async (tx) => {
       const release = write.release;
-      if (release && release.waits.length > 0) {
+      if (write.signal) {
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(${signalLock})`);
+      } else if (release && release.waits.length > 0) {
         await tx.execute(sql`SELECT pg_advisory_xact_lock_shared(${signalLock})`);
       }
       // The fence: only the lease holder writes, and the row stays locked until commit.
@@ -260,6 +263,9 @@ export class DrizzleWorkflowStore implements WorkflowStore {
 
       if (write.entries.length > 0) {
         await this.upsertEntries(tx, id, write.entries);
+      }
+      if (write.signal) {
+        await this.insertSignal(tx, write.signal);
       }
 
       let handBack = {};
@@ -298,6 +304,8 @@ export class DrizzleWorkflowStore implements WorkflowStore {
         id: i.id,
         workflow: i.workflow,
         version: i.version,
+        parentId: i.parentId ?? null,
+        parentClose: i.parentClose ?? null,
         status: 'pending',
         input: i.input,
         deadline: i.deadline,

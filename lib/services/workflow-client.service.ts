@@ -10,8 +10,8 @@ import type { WorkflowInput, WorkflowOutput } from '../interfaces/workflow-runne
 import type { Journaled } from '../interfaces/workflow-context.interface.js';
 import { WorkflowFailedError, type WorkflowFailureStatus } from '../errors/workflow-failed.error.js';
 import { WorkflowResultTimeoutError } from '../errors/workflow-result-timeout.error.js';
-import { normalize } from './workflow-execution.service.js';
-import { canonical } from '../utils/canonical.util.js';
+import { normalize } from '../utils/normalize.util.js';
+import { assertSameInstance, newInstance } from '../utils/new-instance.util.js';
 import { signalName, type WorkflowSignal } from '../signals/workflow.signal.js';
 import { WorkflowStorage } from '../storage/workflow.storage.js';
 import { stepSignalId, stepStartId } from '../utils/step-scope.util.js';
@@ -19,6 +19,7 @@ import type { WorkflowInstanceDetails, WorkflowPurgeResult, WorkflowStore } from
 import { WorkflowRegistry } from './workflow-registry.service.js';
 import { WorkflowWorker } from './workflow-worker.service.js';
 import { WORKFLOWS_MODULE_OPTIONS } from '../workflows.module-definition.js';
+import { CHILD_ENDED_SIGNAL } from '../workflows.constants.js';
 import type { WorkflowsModuleOptions } from '../interfaces/workflows-module-options.interface.js';
 import type {
   StartWorkflowOptions,
@@ -66,17 +67,10 @@ export class WorkflowClient {
    * retried step gets its instance back instead of starting another.
    */
   async start<W>(workflow: Type<W> | string, input: WorkflowInput<W>, options: StartWorkflowOptions = {}): Promise<WorkflowStartResult> {
-    const { name, version, timeout } = this.registry.resolve(workflow as Type<unknown> | string, options.version);
-    const derived = options.id === undefined ? stepStartId(name) : undefined;
+    const resolved = this.registry.resolve(workflow as Type<unknown> | string, options.version);
+    const derived = options.id === undefined ? stepStartId(resolved.name) : undefined;
     const id = options.id ?? derived ?? randomUUID();
-    if (typeof id !== 'string' || id.length === 0) {
-      throw new TypeError(`Invalid workflow instance id ${JSON.stringify(id)}. Use a non-empty string, such as \`order-\${orderId}\`.`);
-    }
-
-    const normalized = normalize(input);
-    const timeoutMs = options.timeout === undefined ? timeout : runTimeoutMs(options.timeout, 'start()');
-    const now = this.clock.now();
-    const data = { id, workflow: name, version, input: normalized, deadline: timeoutMs === undefined ? null : now + timeoutMs, now };
+    const data = newInstance(resolved, id, input, { caller: 'start()', now: this.clock.now(), timeout: options.timeout });
     // Nothing is awaited before the store's call: on a driver whose transactions are
     // synchronous, its statements must run before the application's transaction callback returns.
     const { instance, created } = await (options.transaction === undefined
@@ -84,34 +78,44 @@ export class WorkflowClient {
       : this.storeMethod('createInTransaction', 'start')(options.transaction, data));
 
     if (!created) {
-      if (instance.workflow !== name) {
-        throw new WorkflowIdConflictError(`Instance "${id}" already exists for workflow "${instance.workflow}", not "${name}".`);
-      }
-      // A store may read an `undefined` input back as `null`. A retried step may build its input
-      // anew (a timestamp in it, say): with an id derived from the step, the first input wins.
-      if (derived === undefined && canonical(instance.input ?? null) !== canonical(normalized ?? null)) {
-        throw new WorkflowIdConflictError(`Instance "${id}" of "${name}" already exists with a different input.`);
-      }
+      // A retried step may build its input anew (a timestamp in it, say): with an id derived
+      // from the step, the first input wins.
+      assertSameInstance(instance, data, { input: derived === undefined, parent: false });
     } else {
       this.worker.kick();
     }
 
-    return { id, workflow: name, version: instance.version, created, status: instance.status };
+    return { id: data.id, workflow: data.workflow, version: instance.version, created, status: instance.status };
   }
 
-  /** The instance, with the signals it waits for and, on request, its journal. `null` for an unknown id. */
+  /**
+   * The instance, with the signals it waits for and, on request, its journal and its children
+   * (every instance it started with `ctx.startChild()`, oldest first; `list({ parentId })` pages
+   * through them). Its own parent is `parentId`. `null` for an unknown id.
+   */
   getStatus(
     id: string,
-    options: { journal: true },
+    options: { journal: true; children?: boolean },
   ): Promise<(WorkflowInstanceDetails & { journal: WorkflowJournalEntry[] }) | null>;
-  getStatus(id: string, options?: { journal?: boolean }): Promise<WorkflowInstanceDetails | null>;
-  async getStatus(id: string, options: { journal?: boolean } = {}): Promise<WorkflowInstanceDetails | null> {
+  getStatus(id: string, options?: { journal?: boolean; children?: boolean }): Promise<WorkflowInstanceDetails | null>;
+  async getStatus(id: string, options: { journal?: boolean; children?: boolean } = {}): Promise<WorkflowInstanceDetails | null> {
     const details = await this.store.get(id, { journal: options.journal === true });
     if (!details) {
       return null;
     }
     if (!options.journal) {
       delete details.journal;
+    }
+
+    if (options.children) {
+      details.children = [];
+      for (let offset = 0; ; offset += 500) {
+        const page = await this.store.list({ parentId: id, limit: 500, offset });
+        details.children.push(...page);
+        if (page.length < 500) {
+          break;
+        }
+      }
     }
     return details;
   }
@@ -210,7 +214,7 @@ export class WorkflowClient {
     return this.result<WorkflowOutput<W>>(id, wait);
   }
 
-  /** Instances by status, workflow name and version, oldest first. At most `limit` (default 100). */
+  /** Instances by status, workflow name, version and parent, oldest first. At most `limit` (default 100). */
   async list(filter: WorkflowListFilter = {}): Promise<WorkflowInstance[]> {
     const limit = filter.limit ?? 100;
     const offset = filter.offset ?? 0;
@@ -229,6 +233,7 @@ export class WorkflowClient {
       ...(status ? { status } : {}),
       ...(filter.workflow !== undefined ? { workflow: filter.workflow } : {}),
       ...(filter.version !== undefined ? { version: filter.version } : {}),
+      ...(filter.parentId !== undefined ? { parentId: filter.parentId } : {}),
     });
   }
 
@@ -388,7 +393,9 @@ export class WorkflowClient {
   /**
    * Deletes an instance with its journal, and emits `workflow-deleted`. Only a finished one,
    * unless `force`: then an unfinished one too, without compensating (to remove an instance no
-   * worker can run any more, such as one of a version you no longer deploy). Throws
+   * worker can run any more, such as one of a version you no longer deploy). A parent waiting
+   * for a child deleted that way gets a `ChildWorkflowFailedError` (`cancelled`); a deleted
+   * parent's children keep running. Throws
    * `WorkflowNotFoundError` for an unknown id, and `WorkflowStateError` for an unfinished one
    * without `force`.
    */
@@ -411,6 +418,13 @@ export class WorkflowClient {
     }
 
     this.emit(details, { type: 'workflow-deleted', status: details.status });
+
+    // A parent waiting for this child would wait forever: it ends for the parent as cancelled.
+    if (details.parentId !== null && !FINISHED.includes(details.status)) {
+      const ended = { status: 'cancelled', error: { name: 'WorkflowDeletedError', message: `Child instance "${id}" was deleted before it ended.` } };
+      await this.store.signal({ name: CHILD_ENDED_SIGNAL, key: id, dedupeId: id, payload: ended, now: this.clock.now() });
+      this.worker.kick();
+    }
   }
 
   /**

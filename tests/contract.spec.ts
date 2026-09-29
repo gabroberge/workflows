@@ -46,7 +46,7 @@ if (storeKind === 'memory') {
 // The suite itself, once: it needs no database.
 if (storeKind === 'memory') {
   describe('the contract suite', () => {
-    it('fails a store that loses a wake-up, one that skips the fence, one that ignores dedupe ids, one that drops the custom status, and one that ignores terminates', async () => {
+    it("fails a store that loses a wake-up, one that skips the fence, one that ignores dedupe ids, one that drops the custom status, one that ignores terminates, and ones that drop a write's signal or the parent filter", async () => {
       /** Registers waits without looking for signals that arrived after the execution's cursor. */
       class NoMissedSignalCheck extends InMemoryWorkflowStore {
         override async write(...[id, token, write]: Parameters<InMemoryWorkflowStore['write']>) {
@@ -76,6 +76,20 @@ if (storeKind === 'memory') {
         }
       }
 
+      /** Drops the signal a write carries. */
+      class NoWriteSignal extends InMemoryWorkflowStore {
+        override async write(...[id, token, write]: Parameters<InMemoryWorkflowStore['write']>) {
+          return super.write(id, token, { ...write, signal: undefined });
+        }
+      }
+
+      /** Lists every instance, whatever parentId asks for. */
+      class NoParentFilter extends InMemoryWorkflowStore {
+        override async list(...[query]: Parameters<InMemoryWorkflowStore['list']>) {
+          return super.list({ ...query, parentId: undefined });
+        }
+      }
+
       /** Stores every signal, dedupe id or not. */
       class NoDedupe extends InMemoryWorkflowStore {
         override async signal(...[signal]: Parameters<InMemoryWorkflowStore['signal']>) {
@@ -95,6 +109,7 @@ if (storeKind === 'memory') {
         expect.arrayContaining(['write() keeps an instance due when a signal for its new waits arrived after its cursor']),
       );
       expect(await failures(() => new NoDedupe())).toEqual([
+        'write() with a signal records it as signal() does, only when the write lands',
         'signal() with a dedupeId stores the signal once per name, and a repeat writes and wakes nothing',
         'concurrent signals with one dedupeId store it once, and every call returns its id',
       ]);
@@ -103,6 +118,11 @@ if (storeKind === 'memory') {
         'renew() extends the lease and reads the cancel flags while the token is current, and returns null after',
         'requestCancel() with terminate accepts once, also after a cancel and for a compensating instance',
       ]);
+      expect(await failures(() => new NoWriteSignal())).toEqual([
+        'write() with a signal records it as signal() does, only when the write lands',
+        "a child's ending write racing its parent's suspension never loses the wake-up",
+      ]);
+      expect(await failures(() => new NoParentFilter())).toEqual(['create() keeps the parent link, and list() finds the children by parentId']);
       expect(await failures(() => new ExpiryFence())).toEqual(
         expect.arrayContaining(['write() changes nothing under a stale token', "a stale lease holder's writes never land, however they interleave with the new holder's"]),
       );

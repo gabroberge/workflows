@@ -2,6 +2,7 @@ import type { SerializedWorkflowError } from './serialized-workflow-error.interf
 import type {
   WorkflowInstance,
   WorkflowJournalEntry,
+  WorkflowParentClose,
   WorkflowStatus,
   WorkflowWait,
 } from './workflow-instance.interface.js';
@@ -160,6 +161,8 @@ export interface WorkflowStore {
 export interface WorkflowInstanceDetails extends WorkflowInstance {
   /** Signals the instance waits for, if suspended in `waitForSignal()`. */
   waits: WorkflowWait[];
+  /** `WorkflowClient.getStatus(id, { children: true })` only: the instances it started with `ctx.startChild()`, oldest first. */
+  children?: WorkflowInstance[];
   /** With `{ journal: true }`: every step, sleep, wait and compensation, in first-write order. */
   journal?: WorkflowJournalEntry[];
 }
@@ -169,6 +172,10 @@ export interface NewWorkflowInstance {
   workflow: string;
   version: number;
   input: unknown;
+  /** For a child (`ctx.startChild()`): its parent's id, stored as `parentId`. Absent: `null`. */
+  parentId?: string | null;
+  /** For a child: stored as `parentClose`. Absent: `null`. */
+  parentClose?: WorkflowParentClose | null;
   /** The instance's `deadline`: when its run timeout passes, or `null`. Stored as is. */
   deadline: number | null;
   /**
@@ -193,6 +200,8 @@ export interface WorkflowListQuery {
   status?: WorkflowStatus[];
   workflow?: string;
   version?: number;
+  /** Children of this instance. */
+  parentId?: string;
   limit: number;
   offset: number;
 }
@@ -292,12 +301,12 @@ export interface WorkflowClaim {
 /**
  * One write by the lease holder (`WorkflowStore.write()`). In one transaction:
  *
- * 1. If `release.waits` is not empty, take the signal lock in shared mode (see
- *    `WorkflowStore.signal()`), before anything else.
+ * 1. With a `signal`, take the signal lock (see `WorkflowStore.signal()`) exclusively; else, if
+ *    `release.waits` is not empty, in shared mode. Before anything else.
  * 2. Lock the instance row if its lease token is `token`; if not, write nothing, return `false`.
  * 3. Upsert `entries` by name.
  * 4. Set `status`, `output`, `error` and `customStatus` when present (`undefined` leaves them as
- *    they are).
+ *    they are), and record `signal` when present.
  * 5. With `release`: replace the instance's waits with `release.waits`, clear `leaseToken` and
  *    `leaseUntil` (keep `leaseOwner`), and set `wakeAt`: `now` if a signal with an id above
  *    `release.signalCursor` matches one of the new waits (name and exact key), or if the
@@ -319,6 +328,12 @@ export interface WorkflowWrite {
   error?: SerializedWorkflowError | null;
   /** The instance's `customStatus` (`null` clears it). */
   customStatus?: unknown;
+  /**
+   * A signal to record as `signal()` records it (dedupe and wake-ups included), in this write's
+   * transaction and only if the write lands: how a child that ends tells its parent. The signal
+   * lock is then taken exclusively in step 1.
+   */
+  signal?: NewWorkflowSignal;
   /** Hand the instance back: parked (`suspended`), finished, or due again at once. */
   release?: WorkflowRelease;
 }

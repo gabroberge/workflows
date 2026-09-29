@@ -71,6 +71,8 @@ export function workflowStoreContract(
         id: 'order-1',
         workflow: 'order-fulfilment',
         version: 3,
+        parentId: null,
+        parentClose: null,
         status: 'pending',
         input,
         error: null,
@@ -127,6 +129,24 @@ export function workflowStoreContract(
     equal(await ids({ workflow: 'order-fulfilment', version: 1 }), ['a', 'c', 'e'], 'by workflow and version');
     equal(await ids({ workflow: 'invoice-batch' }), ['d'], 'by workflow');
     equal(await ids({ status: ['completed'] }), [], 'nothing matches');
+  });
+
+  add('create() keeps the parent link, and list() finds the children by parentId', async (t) => {
+    await t.create('order-1');
+    const child = (id: string, parentId: string, parentClose: 'cancel' | 'terminate' | 'abandon', now: number) =>
+      t.store.create({ id, workflow: 'shipping', version: 1, input: { id }, deadline: null, parentId, parentClose, now });
+    expect(await child('order-1/shipping#1', 'order-1', 'cancel', 5), { created: true, instance: { parentId: 'order-1', parentClose: 'cancel' } }, 'a child');
+    await child('order-1/shipping#2', 'order-1', 'abandon', 6);
+    await child('order-2/shipping#1', 'order-2', 'terminate', 4);
+
+    expect(await t.store.get('order-1/shipping#2'), { parentId: 'order-1', parentClose: 'abandon' }, 'read back');
+    expect(await t.store.get('order-1'), { parentId: null, parentClose: null }, 'no parent');
+    const children = async (parentId: string, extra: Partial<Parameters<WorkflowStore['list']>[0]> = {}) =>
+      (await t.store.list({ limit: 100, offset: 0, parentId, ...extra })).map((i) => i.id);
+    equal(await children('order-1'), ['order-1/shipping#1', 'order-1/shipping#2'], "order-1's children, oldest first");
+    equal(await children('order-1', { status: ['pending'], limit: 1, offset: 1 }), ['order-1/shipping#2'], 'a page, with other filters');
+    equal(await children('order-2'), ['order-2/shipping#1'], "order-2's");
+    equal(await children('order-1/shipping#1'), [], 'none');
   });
 
   // ---------------------------------------------------------------- claims and leases
@@ -332,6 +352,38 @@ export function workflowStoreContract(
     equal(c?.id, 'a', 'a is claimable');
     await t.store.write('a', 't2', { now: 4, entries: [], status: 'suspended', release: { wakeAt: FAR, waits: [{ signal: 'go', key: 'a' }], signalCursor: (await t.claim(0)).lastSignalId } });
     expect(await t.store.get('a'), { wakeAt: FAR }, 'a signal at or below the cursor was seen: parked');
+  });
+
+  add('write() with a signal records it as signal() does, only when the write lands', async (t) => {
+    await t.create('parent', 0);
+    await t.create('child', 1);
+    await t.claim(1, { token: 'p', limit: 1 });
+    const parked = { wakeAt: FAR, waits: [{ signal: 'child.ended', key: 'child' }], signalCursor: 0 };
+    await t.store.write('parent', 'p', { now: 2, entries: [], status: 'suspended', release: parked });
+    await t.claim(3, { token: 'stale', leaseUntil: 4 });
+    await t.claim(5, { token: 'c' });
+    const ended = { name: 'child.ended', key: 'child', dedupeId: 'child', payload: { status: 'completed', output: { label: 'LBL-1' } }, now: 6 };
+    const finish = (token: string, now: number) =>
+      t.store.write('child', token, { now, entries: [], status: 'completed', output: 1, error: null, release: { wakeAt: null, waits: [], signalCursor: 0 }, signal: { ...ended, now } });
+
+    equal(await finish('stale', 6), false, 'a stale write');
+    equal((await t.claim(0)).lastSignalId, 0, 'no signal from the stale write');
+    expect(await t.store.get('parent'), { wakeAt: FAR }, 'nothing woken');
+
+    equal(await finish('c', 7), true, 'the lease holder ends the child');
+    const { lastSignalId } = await t.claim(0);
+    equal(
+      await t.store.signals({ name: 'child.ended', key: 'child', afterId: 0, upToId: lastSignalId }),
+      [{ id: lastSignalId, name: 'child.ended', key: 'child', payload: ended.payload, createdAt: 7 }],
+      'the signal, recorded',
+    );
+    expect(await t.store.get('parent'), { status: 'suspended', wakeAt: 7, updatedAt: 7 }, 'the parent, woken');
+    expect(await t.store.get('child'), { status: 'completed', output: 1 }, 'the child, ended');
+
+    // Deduplicated as signal() does: a retried child that ends again stores nothing more.
+    await t.store.signal({ name: 'other', key: null, dedupeId: null, payload: null, now: 8 });
+    await t.claim(0, { token: 'again' }); // nothing is due; a claim of a finished child never happens
+    expect(await t.store.signal({ ...ended, now: 9 }), { id: lastSignalId, created: false, woken: 0 }, 'the same dedupe id');
   });
 
   add('signal() with a dedupeId stores the signal once per name, and a repeat writes and wakes nothing', async (t) => {
@@ -704,6 +756,41 @@ export function workflowStoreContract(
 
       const parked = (await t.store.list({ limit: n, offset: 0 })).filter((i) => i.wakeAt === FAR).map((i) => i.id);
       equal(parked, [], 'every instance was woken by its signal (wakeAt 6) or saw it while suspending (5)');
+    });
+
+    add("a child's ending write racing its parent's suspension never loses the wake-up", async (t) => {
+      const n = 30;
+      for (let i = 0; i < n; i++) {
+        await t.create(`parent-${i}`);
+        await t.create(`child-${i}`);
+      }
+
+      const { instances } = await t.claim(1, { limit: 2 * n, leaseUntil: FAR, token: 't' });
+      equal(instances.length, 2 * n, 'claimed');
+      await Promise.all(
+        Array.from({ length: n }, async (_, i) => {
+          const { lastSignalId: cursor } = await t.claim(0);
+          const suspend = async () => {
+            await jitter();
+            const release = { wakeAt: FAR, waits: [{ signal: 'child.ended', key: `child-${i}` }], signalCursor: cursor };
+            if (!(await t.store.write(`parent-${i}`, 't', { now: 5, entries: [], status: 'suspended', release }))) {
+              throw new Error(`suspending parent-${i} was refused`);
+            }
+          };
+          const end = async () => {
+            await jitter();
+            const signal = { name: 'child.ended', key: `child-${i}`, dedupeId: `child-${i}`, payload: i, now: 6 };
+            const release = { wakeAt: null, waits: [], signalCursor: cursor };
+            if (!(await t.store.write(`child-${i}`, 't', { now: 6, entries: [], status: 'completed', output: i, error: null, release, signal }))) {
+              throw new Error(`ending child-${i} was refused`);
+            }
+          };
+          await Promise.all([suspend(), end()]);
+        }),
+      );
+
+      const parked = (await t.store.list({ limit: 2 * n, offset: 0 })).filter((i) => i.wakeAt === FAR).map((i) => i.id);
+      equal(parked, [], "every parent was woken by its child's end (wakeAt 6) or saw it while suspending (5)");
     });
 
     add('signal ids become visible in id order: nothing below a cursor shows up later', async (t) => {

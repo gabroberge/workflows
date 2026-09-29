@@ -1,4 +1,7 @@
+import type { Type } from '@nestjs/common';
 import type { Duration } from '../utils/duration.util.js';
+import type { WorkflowParentClose } from './workflow-instance.interface.js';
+import type { WorkflowInput, WorkflowOutput } from './workflow-runner.interface.js';
 import type { SerializedWorkflowError } from './serialized-workflow-error.interface.js';
 import type { WorkflowSignal } from '../signals/workflow.signal.js';
 import type { WorkflowRetryOptions } from './workflow-retry-options.interface.js';
@@ -91,12 +94,48 @@ export interface WaitForSignalOptions<T> {
 declare const conditionValue: unique symbol;
 
 /**
- * Something `ctx.waitForAny()` waits for, made by `ctx.signalWait()` or `ctx.timer()`. Only a
+ * Something `ctx.waitForAny()` waits for, made by `ctx.signalWait()` or `ctx.timer()`, or a
+ * child's handle (`ctx.startChild()`). Only a
  * description: nothing is waited for, and nothing journaled, until it is passed to `waitForAny()`.
  */
 export interface WorkflowCondition<T = unknown> {
   /** Type-only: the `value` `waitForAny()` returns when this condition wins. Never set at runtime. */
   readonly [conditionValue]?: T;
+}
+
+/** What `ctx.startChild()` and `ctx.executeChild()` take. */
+export interface StartChildWorkflowOptions {
+  /**
+   * The child's id. Default: `${parentId}/${workflow}#${n}`, where `n` counts the children of
+   * that workflow this run started before it, so a replay gets the same child back. The id also
+   * names the journal entry: pass one (derived from your data) for children started from
+   * parallel branches, which can reach `startChild()` in another order on a replay.
+   */
+  id?: string;
+  /** Pin a version, as in `WorkflowClient.start()`. Default: the highest this application registers. */
+  version?: number;
+  /** The child's run timeout, overriding its `@Workflow(name, { timeout })`. */
+  timeout?: Duration;
+  /**
+   * What happens to the child if it is still running when this instance ends (completes,
+   * fails, is cancelled or terminated), or starts compensating: `'cancel'` (the default)
+   * cancels it, and its compensations run; `'terminate'` stops it without compensating;
+   * `'abandon'` leaves it running on its own.
+   */
+  parentClose?: WorkflowParentClose;
+}
+
+/** A started child workflow (`ctx.startChild()`). Also a condition for `ctx.waitForAny()`. */
+export interface ChildWorkflowHandle<O = unknown> extends WorkflowCondition<Journaled<O>> {
+  readonly id: string;
+  readonly workflow: string;
+  readonly version: number;
+  /**
+   * Durable wait for the child to end: resolves with its output, or throws a
+   * `ChildWorkflowFailedError` (with the child's status and error) if it failed, was cancelled
+   * or terminated. Journaled, like a signal wait. Calling it again returns the same promise.
+   */
+  result(): Promise<Journaled<O>>;
 }
 
 /** What `ctx.signalWait()` takes: `waitForSignal()`'s options, without a timeout (race a `ctx.timer()` instead). */
@@ -144,8 +183,9 @@ export interface WorkflowContext {
   ): Promise<Journaled<T> | null>;
   /**
    * Durable wait for whichever of several conditions happens first: a signal
-   * (`ctx.signalWait()`) or a timer (`ctx.timer()`). Resolves with the key of the winner and its
-   * value (a signal's payload, `null` for a timer), journaled under `name` as one entry, so a
+   * (`ctx.signalWait()`), a timer (`ctx.timer()`) or a child's end (its handle). Resolves with the
+   * key of the winner and its value (a signal's payload, `null` for a timer, a child's output; a
+   * child that failed throws its `ChildWorkflowFailedError`), journaled under `name` as one entry, so a
    * replay returns the same winner. Only the winning signal is taken: a signal that matched
    * another condition stays for a later wait. When several are ready at once, the earliest
    * signal (lowest id) wins, then the earliest timer; a signal sent after a timer's deadline
@@ -166,6 +206,17 @@ export interface WorkflowContext {
    * `Promise.all()`: each is journaled on its own, and the instance parks once for all of them.
    */
   waitForAny<C extends Record<string, WorkflowCondition<unknown>>>(name: string, conditions: C): Promise<WorkflowAnyResult<C>>;
+  /**
+   * Starts a child instance of another workflow, linked to this one: `getStatus()` shows the
+   * link, `list({ parentId })` finds the children, and `parentClose` decides what happens to a
+   * child still running when this instance ends. Journaled: a replay returns the same child
+   * instead of starting another. Resolves with a handle to wait for the child's result.
+   * Starting a child with an id that another workflow, another parent or another input already
+   * uses throws `WorkflowIdConflictError`.
+   */
+  startChild<W>(workflow: Type<W> | string, input: WorkflowInput<W>, options?: StartChildWorkflowOptions): Promise<ChildWorkflowHandle<WorkflowOutput<W>>>;
+  /** `startChild()`, then its handle's `result()`. */
+  executeChild<W>(workflow: Type<W> | string, input: WorkflowInput<W>, options?: StartChildWorkflowOptions): Promise<Journaled<WorkflowOutput<W>>>;
   /** A signal for `waitForAny()`: its value is the payload. */
   signalWait<T>(signal: WorkflowSignal<T> | string, options?: SignalWaitOptions<T>): WorkflowCondition<Journaled<T>>;
   /** A durable timer for `waitForAny()`: `duration` after the wait is first reached, or at `until`. Its value is `null`. */

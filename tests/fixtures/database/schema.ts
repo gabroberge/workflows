@@ -1,4 +1,4 @@
-import type { SerializedWorkflowError, WorkflowJournalEntry, WorkflowStatus } from '../../../lib/index.js';
+import type { SerializedWorkflowError, WorkflowJournalEntry, WorkflowParentClose, WorkflowStatus } from '../../../lib/index.js';
 import { sql } from 'drizzle-orm';
 import { bigint, boolean, index, integer, jsonb, pgTable, primaryKey, text, unique } from 'drizzle-orm/pg-core';
 import type { OrderItem, OrderStatus } from '../orders/order.js';
@@ -21,6 +21,9 @@ export const workflowInstances = pgTable(
     id: text('id').primaryKey(),
     workflow: text('workflow').notNull(),
     version: integer('version').notNull(),
+    /** The instance that started this one with ctx.startChild(). */
+    parentId: text('parent_id'),
+    parentClose: text('parent_close').$type<WorkflowParentClose>(),
     status: text('status').$type<WorkflowStatus>().notNull(),
     input: jsonb('input'),
     output: jsonb('output'),
@@ -45,6 +48,8 @@ export const workflowInstances = pgTable(
     index('workflow_instances_created').on(t.createdAt, t.id),
     // What purges and list() by status look for.
     index('workflow_instances_status').on(t.status, t.updatedAt),
+    // What list({ parentId }) and closing a parent's children look for.
+    index('workflow_instances_parent').on(t.parentId, t.createdAt).where(sql`${t.parentId} IS NOT NULL`),
   ],
 );
 

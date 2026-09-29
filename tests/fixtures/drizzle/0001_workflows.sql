@@ -2,6 +2,8 @@ CREATE TABLE "workflow_instances" (
 	"id" text PRIMARY KEY NOT NULL,
 	"workflow" text NOT NULL,
 	"version" integer NOT NULL,
+	"parent_id" text,
+	"parent_close" text,
 	"status" text NOT NULL,
 	"input" jsonb,
 	"output" jsonb,
@@ -52,5 +54,6 @@ ALTER TABLE "workflow_waits" ADD CONSTRAINT "workflow_waits_instance_id_workflow
 CREATE INDEX "workflow_instances_due" ON "workflow_instances" USING btree ("wake_at") WHERE "workflow_instances"."wake_at" IS NOT NULL;--> statement-breakpoint
 CREATE INDEX "workflow_instances_created" ON "workflow_instances" USING btree ("created_at","id");--> statement-breakpoint
 CREATE INDEX "workflow_instances_status" ON "workflow_instances" USING btree ("status","updated_at");--> statement-breakpoint
+CREATE INDEX "workflow_instances_parent" ON "workflow_instances" USING btree ("parent_id","created_at") WHERE "workflow_instances"."parent_id" IS NOT NULL;--> statement-breakpoint
 CREATE INDEX "workflow_signals_lookup" ON "workflow_signals" USING btree ("name","key","id");--> statement-breakpoint
 CREATE INDEX "workflow_waits_signal" ON "workflow_waits" USING btree ("signal","key");

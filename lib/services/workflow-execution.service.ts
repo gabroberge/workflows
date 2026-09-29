@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { Logger } from '@nestjs/common';
-import { randomUUID } from 'node:crypto';
+import { Logger, type Type } from '@nestjs/common';
+import { createHash, randomUUID } from 'node:crypto';
 import { setImmediate as nextMacrotask } from 'node:timers/promises';
 import type { WorkflowClock } from '../interfaces/workflow-clock.interface.js';
 import { toMs, type Duration } from '../utils/duration.util.js';
@@ -20,6 +20,7 @@ import { runInStepScope } from '../utils/step-scope.util.js';
 import type { SerializedWorkflowError } from '../interfaces/serialized-workflow-error.interface.js';
 import type {
   Journaled,
+  StartChildWorkflowOptions,
   WaitForSignalOptions,
   WorkflowCompensationContext,
   WorkflowCondition,
@@ -30,17 +31,26 @@ import type {
 import type {
   WorkflowInstance,
   WorkflowJournalEntry,
+  WorkflowParentClose,
+  WorkflowStatus,
   WorkflowWait,
 } from '../interfaces/workflow-instance.interface.js';
+import type { WorkflowMetadata } from '../interfaces/workflow-decorator-options.interface.js';
+import { ChildWorkflowFailedError } from '../errors/child-workflow-failed.error.js';
+import type { WorkflowFailureStatus } from '../errors/workflow-failed.error.js';
+import { WorkflowIdConflictError } from '../errors/workflow-id-conflict.error.js';
+import { CHILD_ENDED_SIGNAL } from '../workflows.constants.js';
+import { newInstance } from '../utils/new-instance.util.js';
 import type { WorkflowRetryOptions } from '../interfaces/workflow-retry-options.interface.js';
 import { resolveRetry, retryDelay, type ResolvedRetry } from '../utils/retry.util.js';
 import { entryBytes } from '../utils/journal-limits.util.js';
 import { canonical } from '../utils/canonical.util.js';
+import { normalize } from '../utils/normalize.util.js';
 import type { WorkflowJournalLimits } from '../interfaces/workflows-module-options.interface.js';
 import type { WorkflowEvents } from '../events/workflow-events.service.js';
 import type { WorkflowEvent } from '../events/workflow-events.interface.js';
-import { signalName, type WorkflowSignal } from '../signals/workflow.signal.js';
-import type { WorkflowSignalRecord, WorkflowStore } from '../interfaces/workflow-store.interface.js';
+import { signalName } from '../signals/workflow.signal.js';
+import type { NewWorkflowInstance, WorkflowSignalRecord, WorkflowStore } from '../interfaces/workflow-store.interface.js';
 
 /** An instance under a worker's lease. */
 export interface ClaimedWorkflowInstance extends WorkflowInstance {
@@ -56,17 +66,6 @@ export function uniqueEntries<T extends { name: string }>(entries: T[]): T[] {
   return [...latest.values()];
 }
 
-/**
- * Round-trips through JSON so the first run sees exactly what every replay
- * will see (a `Date` becomes a string in both, `undefined` stays `undefined`).
- */
-export function normalize<T>(value: T): T {
-  if (value === undefined) {
-    return value;
-  }
-  const json = JSON.stringify(value);
-  return json === undefined ? (undefined as T) : JSON.parse(json);
-}
 
 type EventBody = WorkflowEvent extends infer E
   ? E extends WorkflowEvent
@@ -79,6 +78,13 @@ type RetrySetting = number | false | WorkflowRetryOptions | undefined;
 
 export interface ExecutionDeps {
   store: WorkflowStore;
+  /** The workflow `ctx.startChild()` starts: its name, version and run timeout (`WorkflowRegistry.resolve()`). */
+  resolve(workflow: Type<unknown> | string, version?: number): WorkflowMetadata;
+  /**
+   * Creates a child, or finds the one an interrupted execution created, and throws
+   * `WorkflowIdConflictError` if the id holds another instance.
+   */
+  createChild(instance: NewWorkflowInstance): Promise<WorkflowInstance>;
   clock: WorkflowClock;
   events: WorkflowEvents;
   defaultRetry: ResolvedRetry;
@@ -124,6 +130,69 @@ export class Condition {
     // Checked now, where the mistake is: the deadline itself is fixed when the wait is reached.
     wakeTime('timer', when, 0);
     return new Condition(null, undefined, when, () => null);
+  }
+}
+
+/** What a child sends its parent when it ends (`CHILD_ENDED_SIGNAL`). */
+export interface ChildEnded {
+  status: WorkflowStatus;
+  output?: unknown;
+  error?: SerializedWorkflowError | null;
+}
+
+/** A `$child:<id>` journal entry's `result`: the child that was started. */
+interface ChildStart {
+  id: string;
+  workflow: string;
+  version: number;
+}
+
+/** A `$child:<id>` journal entry's `data`: what was asked for, to tell a replay that asks for something else. */
+interface ChildRequest {
+  id: string;
+  workflow: string;
+  /** SHA-256 of the input's canonical JSON. */
+  input: string;
+}
+
+/** `ChildWorkflowHandle`: waits for the child's end, once per execution, as `result()` or as a `waitForAny()` condition. */
+export class ChildHandle {
+  readonly condition: Condition;
+  private outcome?: { value: unknown } | { error: ChildWorkflowFailedError };
+  private waiting?: Promise<unknown>;
+
+  constructor(
+    readonly id: string,
+    readonly workflow: string,
+    readonly version: number,
+    private readonly wait: (handle: ChildHandle) => Promise<unknown>,
+  ) {
+    this.condition = Condition.signal({ signal: CHILD_ENDED_SIGNAL, key: id }, undefined, (payload) => this.settle(payload));
+  }
+
+  result(): Promise<unknown> {
+    if (this.outcome) {
+      return 'error' in this.outcome ? Promise.reject(this.outcome.error) : Promise.resolve(this.outcome.value);
+    }
+    return (this.waiting ??= this.wait(this));
+  }
+
+  /** The child's output, from its journaled end, or its failure, thrown. Kept, so a later `result()` returns it. */
+  settle(payload: unknown): unknown {
+    const ended = payload as ChildEnded;
+    if (ended.status === 'completed') {
+      this.outcome = { value: ended.output };
+      return ended.output;
+    }
+
+    const error = new ChildWorkflowFailedError(
+      this.workflow,
+      this.id,
+      ended.status as WorkflowFailureStatus,
+      ended.error ?? { name: 'Error', message: 'Unknown failure.' },
+    );
+    this.outcome = { error };
+    throw error;
   }
 }
 
@@ -197,6 +266,8 @@ export class WorkflowExecution {
   /** The last journal write issued; the next one waits for it (see `write()`). */
   private writes: Promise<void> = Promise.resolve();
   private readonly counters = { now: 0, random: 0, uuid: 0 };
+  /** Children started so far in this run, per workflow name: the default child ids. */
+  private readonly childCounters = new Map<string, number>();
   /** The first interrupt that stops this execution (not a suspension). */
   private stoppedBy: WorkflowInterrupt | null = null;
   /** The step whose function is running, in that function's async context. */
@@ -242,7 +313,11 @@ export class WorkflowExecution {
       version: instance.version,
       step: (name, fn, options) => this.track(this.step(name, fn, options)),
       sleep: (name, duration) => this.track(this.sleep(name, duration)),
-      waitForSignal: (name, signal, options) => this.track(this.waitForSignal(name, signal, options)),
+      waitForSignal: (name, signal, options = {}) =>
+        this.track(this.receive(name, { signal: signalName(signal), key: options.key ?? null }, options, false)) as Promise<any>,
+      startChild: (workflow, input, options) => this.track(this.startChild(workflow, input, options)) as Promise<any>,
+      executeChild: (workflow, input, options) =>
+        this.track(this.startChild(workflow, input, options).then((handle) => handle.result())) as Promise<any>,
       waitForAny: (name, conditions) => this.track(this.waitForAny(name, conditions)) as Promise<any>,
       signalWait: (signal, options = {}) => Condition.signal({ signal: signalName(signal), key: options.key ?? null }, options.match) as WorkflowCondition<any>,
       timer: (when) => Condition.timer(when) as WorkflowCondition<null>,
@@ -453,23 +528,19 @@ export class WorkflowExecution {
     throw this.suspendUntil(wakeAt);
   }
 
-  private async waitForSignal<T>(
-    name: string,
-    signal: WorkflowSignal<T> | string,
-    options: WaitForSignalOptions<T> = {},
-  ): Promise<Journaled<T> | null> {
-    this.assertNotInStep(`waitForSignal("${name}")`);
-    this.visit(name, 'signal');
+  /** `waitForSignal()`, and (`internal`) a child handle's `result()`, whose wait is named `$result:<id>`. */
+  private async receive(name: string, wait: WorkflowWait, options: WaitForSignalOptions<any>, internal: boolean): Promise<unknown> {
+    this.assertNotInStep(internal ? 'startChild() handle result()' : `waitForSignal("${name}")`);
+    this.visit(name, 'signal', internal);
     const entry = unlessCancelled(this.journal.get(name));
     if (entry?.status === 'completed') {
-      return (entry.result as { payload: Journaled<T> | null }).payload;
+      return (entry.result as { payload: unknown }).payload;
     }
     if (this.mode !== 'run') {
       throw this.interrupt('halt');
     }
 
     this.assertAlive();
-    const wait: WorkflowWait = { signal: signalName(signal), key: options.key ?? null };
     const deadline = entry
       ? (entry.wakeAt ?? null)
       : options.timeout !== undefined
@@ -495,8 +566,10 @@ export class WorkflowExecution {
           result: { signalId: candidate.id, payload: candidate.payload },
         },
       ]);
-      this.emit({ type: 'signal-received', wait: name, signal: wait.signal, signalId: candidate.id });
-      return candidate.payload as Journaled<T>;
+      if (!internal) {
+        this.emit({ type: 'signal-received', wait: name, signal: wait.signal, signalId: candidate.id });
+      }
+      return candidate.payload;
     }
 
     if (deadline !== null && this.deps.clock.now() >= deadline) {
@@ -508,6 +581,92 @@ export class WorkflowExecution {
     }
 
     throw this.suspendUntil(deadline, [wait]);
+  }
+
+  private async startChild(workflow: Type<unknown> | string, input: unknown, options: StartChildWorkflowOptions = {}): Promise<ChildHandle> {
+    this.assertNotInStep('startChild()', 'Start the child from run(), and pass it what the step returned.');
+    if (this.fatal) {
+      throw this.fatal;
+    }
+
+    const parentClose = options.parentClose ?? 'cancel';
+    if (!PARENT_CLOSE.includes(parentClose)) {
+      throw new TypeError(`Invalid parentClose ${JSON.stringify(parentClose)} for startChild(). Use 'cancel', 'terminate' or 'abandon'.`);
+    }
+    const resolved = this.deps.resolve(workflow, options.version);
+    const n = (this.childCounters.get(resolved.name) ?? 0) + 1;
+    this.childCounters.set(resolved.name, n);
+    const child = newInstance(resolved, options.id ?? `${this.instance.id}/${resolved.name}#${n}`, input, {
+      caller: 'startChild()',
+      now: this.deps.clock.now(),
+      timeout: options.timeout,
+      parentId: this.instance.id,
+      parentClose,
+    });
+
+    const name = `$child:${child.id}`;
+    this.visit(name, 'child', true);
+    const request: ChildRequest = { id: child.id, workflow: child.workflow, input: createHash('sha256').update(canonical(child.input ?? null)).digest('base64url') };
+    const entry = this.journal.get(name);
+    if (entry && entry.status !== 'pending') {
+      const recorded = entry.data as ChildRequest;
+      if (recorded.workflow !== request.workflow || recorded.input !== request.input) {
+        throw this.setFatal(
+          new WorkflowNonDeterminismError(
+            `${this.describe()} does not match its journal: child "${child.id}" was started as "${recorded.workflow}"` +
+              `${recorded.workflow === request.workflow ? ' with another input' : ''}, but the code now starts "${request.workflow}". ` +
+              'Children started from parallel branches need ids of their own ({ id }). ' +
+              ADVICE,
+          ),
+        );
+      }
+      if (entry.status === 'failed') {
+        throw new WorkflowIdConflictError(entry.error!.message);
+      }
+      return this.handle(entry.result as ChildStart);
+    }
+    if (this.mode !== 'run') {
+      throw this.interrupt('halt');
+    }
+
+    this.assertCanStart();
+    await this.reachFrontier(name);
+    this.assertCanStart();
+    // Recorded before the child exists, so a parent that crashes right after creating it still
+    // knows it has children to close when it ends.
+    if (!entry) {
+      await this.write([{ name, kind: 'child', status: 'pending', attempts: 0, data: request }]);
+    }
+
+    let created: WorkflowInstance;
+    try {
+      created = await this.deps.createChild(child);
+    } catch (error) {
+      if (!(error instanceof WorkflowIdConflictError)) {
+        this.storeError = error;
+        this.abort.abort(new WorkflowInterrupt('store-error'));
+        throw this.interrupt('store-error');
+      }
+
+      await this.write([{ name, kind: 'child', status: 'failed', attempts: 1, data: request, error: serializeError(error) }]);
+      throw error;
+    }
+
+    const started: ChildStart = { id: child.id, workflow: child.workflow, version: created.version };
+    await this.write([{ name, kind: 'child', status: 'completed', attempts: 1, data: request, result: started }]);
+    this.emit({ type: 'child-started', child: started.id, childWorkflow: started.workflow, childVersion: started.version });
+    return this.handle(started);
+  }
+
+  private handle(started: ChildStart): ChildHandle {
+    return new ChildHandle(started.id, started.workflow, started.version, (handle) =>
+      this.track(this.receive(`$result:${handle.id}`, handle.condition.wait!, {}, true).then((payload) => handle.settle(payload))),
+    );
+  }
+
+  /** Whether this instance started children, whose `parentClose` applies when it ends. */
+  hasChildren(): boolean {
+    return [...this.journal.values()].some((entry) => entry.kind === 'child');
   }
 
   private async waitForAny(name: string, conditions: Record<string, unknown>): Promise<{ key: string; value: unknown }> {
@@ -938,13 +1097,13 @@ export class WorkflowExecution {
     );
   }
 
-  private visit(name: string, kind: JournalKind): void {
+  private visit(name: string, kind: JournalKind, internal = false): void {
     if (this.fatal) {
       throw this.fatal;
     }
 
     const helper = kind === 'now' || kind === 'random' || kind === 'uuid';
-    if (typeof name !== 'string' || name.length === 0 || (!helper && name.startsWith('$'))) {
+    if (typeof name !== 'string' || name.length === 0 || (!helper && !internal && name.startsWith('$'))) {
       throw this.setFatal(new WorkflowDefinitionError(`Invalid ${kind} name "${name}". Names cannot be empty or start with "$".`));
     }
 
@@ -1230,15 +1389,19 @@ function conditionsOf(name: string, conditions: Record<string, unknown>): Map<st
     throw new TypeError(`waitForAny("${name}") takes an object with at least one condition, such as { delivered: ctx.signalWait(shipmentDelivered) }.`);
   }
 
+  const branches = new Map<string, Condition>();
   for (const [key, condition] of entries) {
-    if (!(condition instanceof Condition)) {
-      throw new TypeError(`waitForAny("${name}"): "${key}" is not a condition. Make each one with ctx.signalWait() or ctx.timer().`);
+    const branch = condition instanceof ChildHandle ? condition.condition : condition;
+    if (!(branch instanceof Condition)) {
+      throw new TypeError(`waitForAny("${name}"): "${key}" is not a condition. Make each one with ctx.signalWait() or ctx.timer(), or pass a child's handle.`);
     }
+    branches.set(key, branch);
   }
-  return new Map(entries as Array<[string, Condition]>);
+  return branches;
 }
 
 const COMPENSATE = '$compensate:';
+const PARENT_CLOSE: WorkflowParentClose[] = ['cancel', 'terminate', 'abandon'];
 
 /** The most a custom status (`ctx.setStatus()`) may take as JSON. */
 const MAX_CUSTOM_STATUS_BYTES = 16_384;

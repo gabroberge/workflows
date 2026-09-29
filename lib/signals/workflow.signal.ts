@@ -20,6 +20,9 @@ export function assertSignalName(name: unknown): asserts name is string {
   if (typeof name !== 'string' || name.length === 0) {
     throw new TypeError(`Invalid signal name ${JSON.stringify(name)}. Use a non-empty string such as "shipment.delivered".`);
   }
+  if (name.startsWith('$')) {
+    throw new TypeError(`Invalid signal name "${name}": names starting with "$" are reserved for the engine's own signals.`);
+  }
 }
 
 export function signalName(signal: WorkflowSignal<unknown> | string): string {

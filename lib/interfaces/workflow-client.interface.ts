@@ -102,6 +102,8 @@ export interface WorkflowListFilter {
   workflow?: string;
   /** With `workflow`: only instances on this version (to see whether an old version has drained). */
   version?: number;
+  /** Only the children this instance started with `ctx.startChild()`. */
+  parentId?: string;
   /** Default 100. */
   limit?: number;
   offset?: number;

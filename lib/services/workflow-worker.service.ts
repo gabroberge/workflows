@@ -17,10 +17,14 @@ import { serializeError } from '../utils/serialize-error.util.js';
 import type { SerializedWorkflowError } from '../interfaces/serialized-workflow-error.interface.js';
 import { DEFAULT_RETRY, resolveRetry } from '../utils/retry.util.js';
 import { resolveJournalLimits } from '../utils/journal-limits.util.js';
+import { normalize } from '../utils/normalize.util.js';
+import { assertSameInstance } from '../utils/new-instance.util.js';
+import { CHILD_ENDED_SIGNAL } from '../workflows.constants.js';
+import type { WorkflowStatus } from '../interfaces/workflow-instance.interface.js';
 import {
-  normalize,
   uniqueEntries,
   WorkflowExecution,
+  type ChildEnded,
   type ClaimedWorkflowInstance,
   type ExecutionDeps,
   type RunOutcome,
@@ -106,6 +110,16 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
     this.deps = {
       get store() {
         return storage.source;
+      },
+      resolve: (workflow, version) => registry.resolve(workflow, version),
+      createChild: async (child) => {
+        const { instance, created } = await storage.source.create(child);
+        if (created) {
+          this.kick();
+        } else {
+          assertSameInstance(instance, child, { input: true, parent: true });
+        }
+        return instance;
       },
       clock: this.clock,
       events,
@@ -405,6 +419,8 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
       }
       this.emit(instance, { type: 'workflow-compensating', error: reason });
     }
+    // Every execution that compensates closes them again: a crash can't leave one running.
+    await this.closeChildren(exec, instance, `its parent "${instance.id}" is compensating (${reason.name}: ${reason.message})`);
 
     const result = await exec.compensate(reason);
     switch (result.state) {
@@ -430,6 +446,36 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
         return;
       case 'terminated':
         return this.terminate(exec, instance);
+    }
+  }
+
+  /**
+   * Applies each child's `parentClose` to the children of this instance that are still running:
+   * cancels or terminates them. At least once: it runs again after a crash, and a request that
+   * was already accepted is refused, changing nothing.
+   */
+  private async closeChildren(exec: WorkflowExecution, instance: ClaimedWorkflowInstance, reason: string): Promise<void> {
+    if (!exec.hasChildren()) {
+      return;
+    }
+
+    // Every child, oldest first: the list's order doesn't change while the statuses do.
+    for (let offset = 0; ; offset += CHILDREN_PAGE) {
+      const children = await this.store.list({ parentId: instance.id, limit: CHILDREN_PAGE, offset });
+      for (const child of children) {
+        if (!RUNNABLE.includes(child.status) || child.parentClose === 'abandon' || child.parentClose === null) {
+          continue;
+        }
+
+        const terminate = child.parentClose === 'terminate';
+        const reasonText = `${terminate ? 'Terminated' : 'Cancelled'}: ${reason}.`;
+        if (await this.store.requestCancel(child.id, { reason: reasonText, now: this.clock.now(), terminate })) {
+          this.noticeCancel(child.id, terminate);
+        }
+      }
+      if (children.length < CHILDREN_PAGE) {
+        return;
+      }
     }
   }
 
@@ -481,17 +527,25 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
     status: 'completed' | 'failed' | 'cancelled' | 'compensation_failed',
     result: { output?: unknown; error?: SerializedWorkflowError },
   ): Promise<void> {
+    // Before the instance ends, so a crash in between closes them again on the next execution.
+    await this.closeChildren(exec, instance, `its parent "${instance.id}" ended as ${status}`);
+
     const entries = exec.drainBuffer();
     if (status !== 'completed') {
       entries.push(...exec.abandoned().map((entry) => ({ ...entry, updatedAt: this.clock.now() })));
     }
 
+    // A child tells its parent, in the same transaction: a parent never misses its child's end.
+    const ended: ChildEnded = { status, output: result.output, error: result.error ?? null };
     const ok = await this.write(exec, instance, {
       entries,
       status,
       output: result.output,
       error: result.error ?? null,
       release: this.release(exec, null, []),
+      ...(instance.parentId === null
+        ? {}
+        : { signal: { name: CHILD_ENDED_SIGNAL, key: instance.id, dedupeId: instance.id, payload: ended, now: this.clock.now() } }),
     });
     if (!ok) {
       return this.leaseLostWarning(instance);
@@ -542,6 +596,9 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
 function cancelled(reason: string | null): SerializedWorkflowError {
   return { name: 'WorkflowCancelledError', message: reason ?? 'Cancelled.' };
 }
+
+const RUNNABLE: WorkflowStatus[] = ['pending', 'running', 'suspended', 'compensating'];
+const CHILDREN_PAGE = 500;
 
 function terminated(reason: string | null): SerializedWorkflowError {
   return { name: 'WorkflowTerminatedError', message: reason ?? 'Terminated.' };

@@ -13,8 +13,10 @@ export type {
 export * from './decorators/index.js';
 export { WorkflowSignal } from './signals/index.js';
 export type {
+  ChildWorkflowHandle,
   Journaled,
   SignalWaitOptions,
+  StartChildWorkflowOptions,
   WaitForSignalOptions,
   WorkflowAnyResult,
   WorkflowCompensationContext,
@@ -38,6 +40,7 @@ export type {
   WorkflowInstance,
   WorkflowJournalEntry,
   WorkflowListFilter,
+  WorkflowParentClose,
   WorkflowPurgeOptions,
   WorkflowResultOptions,
   WorkflowRetryInstanceOptions,
@@ -49,6 +52,7 @@ export type {
 
 // Errors
 export {
+  ChildWorkflowFailedError,
   isWorkflowInterrupt,
   NonRetryableStepError,
   StepFailedError,
@@ -70,6 +74,7 @@ export type { SerializedWorkflowError } from './interfaces/index.js';
 export {
   WorkflowEvents,
   type WorkflowCancelledEvent,
+  type WorkflowChildStartedEvent,
   type WorkflowCompensatingEvent,
   type WorkflowCompensationFailedEvent,
   type WorkflowCompletedEvent,

@@ -232,6 +232,6 @@ it('fails an instance that passes no condition, or something else as one', async
   });
   expect(await node.client.getStatus('not-a-condition')).toMatchObject({
     status: 'failed',
-    error: { name: 'TypeError', message: 'waitForAny("bad"): "later" is not a condition. Make each one with ctx.signalWait() or ctx.timer().' },
+    error: { name: 'TypeError', message: 'waitForAny("bad"): "later" is not a condition. Make each one with ctx.signalWait() or ctx.timer(), or pass a child\'s handle.' },
   });
 });

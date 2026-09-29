@@ -92,6 +92,8 @@ export class InMemoryWorkflowStore implements WorkflowStore {
       id: i.id,
       workflow: i.workflow,
       version: i.version,
+      parentId: i.parentId ?? null,
+      parentClose: i.parentClose ?? null,
       status: 'pending',
       input: copy(i.input),
       output: undefined,
@@ -134,7 +136,8 @@ export class InMemoryWorkflowStore implements WorkflowStore {
         (i) =>
           (query.status === undefined || query.status.includes(i.status)) &&
           (query.workflow === undefined || i.workflow === query.workflow) &&
-          (query.version === undefined || i.version === query.version),
+          (query.version === undefined || i.version === query.version) &&
+          (query.parentId === undefined || i.parentId === query.parentId),
       )
       .sort((a, b) => a.createdAt - b.createdAt || compare(a.id, b.id))
       .slice(query.offset, query.offset + query.limit)
@@ -191,6 +194,10 @@ export class InMemoryWorkflowStore implements WorkflowStore {
   }
 
   async signal(s: NewWorkflowSignal): Promise<WorkflowSignalResult> {
+    return this.record(s);
+  }
+
+  private record(s: NewWorkflowSignal): WorkflowSignalResult {
     const earlier = s.dedupeId === null ? undefined : this.signalLog.find((r) => r.name === s.name && r.dedupeId === s.dedupeId);
     if (earlier) {
       return { id: earlier.id, woken: 0, created: false, key: earlier.key };
@@ -307,6 +314,9 @@ export class InMemoryWorkflowStore implements WorkflowStore {
     }
     if (w.customStatus !== undefined) {
       i.customStatus = copy(w.customStatus);
+    }
+    if (w.signal) {
+      this.record(w.signal);
     }
 
     if (w.release) {

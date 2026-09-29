@@ -10,10 +10,17 @@ export type WorkflowStatus =
   | 'cancelled'
   | 'compensation_failed';
 
+/** What happens to a child instance that is still running when its parent ends (`ctx.startChild()`'s `parentClose`). */
+export type WorkflowParentClose = 'cancel' | 'terminate' | 'abandon';
+
 export interface WorkflowInstance {
   id: string;
   workflow: string;
   version: number;
+  /** The instance that started this one with `ctx.startChild()`, or `null`. */
+  parentId: string | null;
+  /** For a child: what happens to it if it is still running when its parent ends. */
+  parentClose: WorkflowParentClose | null;
   status: WorkflowStatus;
   input: unknown;
   output?: unknown;
@@ -48,7 +55,7 @@ export interface WorkflowInstance {
 export interface WorkflowJournalEntry {
   name: string;
   /** `retry`: an operator's `WorkflowClient.retry()`, recorded under `$retry:<n>` with what it retried in `data`. */
-  kind: 'step' | 'sleep' | 'signal' | 'any' | 'commit' | 'now' | 'random' | 'uuid' | 'compensation' | 'retry';
+  kind: 'step' | 'sleep' | 'signal' | 'any' | 'child' | 'commit' | 'now' | 'random' | 'uuid' | 'compensation' | 'retry';
   /**
    * `cancelled`: still pending (a sleep, a wait, a retry backoff) when the
    * instance ended as `cancelled`, `failed` or `compensation_failed`.
@@ -56,7 +63,8 @@ export interface WorkflowJournalEntry {
   status: 'pending' | 'completed' | 'failed' | 'cancelled';
   /**
    * JSON-safe step result, signal `{ signalId, payload }`, `waitForAny()` winner
-   * `{ key, signalId, payload }` (`signalId: null` for a timer), or helper value.
+   * `{ key, signalId, payload }` (`signalId: null` for a timer), started child
+   * `{ id, workflow, version }`, or helper value.
    */
   result?: unknown;
   error?: SerializedWorkflowError;

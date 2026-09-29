@@ -86,6 +86,15 @@ export interface WorkflowStepCompensatedEvent extends WorkflowEventBase {
   attempt: number;
 }
 
+/** Channel `nestjs:workflows:child-started`: the instance started a child (`ctx.startChild()`). */
+export interface WorkflowChildStartedEvent extends WorkflowEventBase {
+  type: 'child-started';
+  /** The child's id. */
+  child: string;
+  childWorkflow: string;
+  childVersion: number;
+}
+
 /** Channel `nestjs:workflows:signal-received`: a wait took a signal. */
 export interface WorkflowSignalReceivedEvent extends WorkflowEventBase {
   type: 'signal-received';
@@ -152,6 +161,7 @@ export type WorkflowEvent =
   | WorkflowStepCompletedEvent
   | WorkflowStepFailedEvent
   | WorkflowStepCompensatedEvent
+  | WorkflowChildStartedEvent
   | WorkflowSignalReceivedEvent
   | WorkflowSignalTimedOutEvent
   | WorkflowJournalLargeEvent
