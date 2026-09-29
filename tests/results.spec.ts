@@ -123,9 +123,10 @@ describe('result()', () => {
     await expect(aborted).rejects.toThrow('The client went away.');
     await expect(node.client.result('refund-o-5', { signal: AbortSignal.abort(new Error('Already gone.')) })).rejects.toThrow('Already gone.');
 
-    const deleted = node.client.result('refund-o-5');
+    // Caught at once: a read of the wait may find the instance gone before delete() returns.
+    const deleted = node.client.result('refund-o-5').catch((error: unknown) => error);
     await node.client.delete('refund-o-5', { force: true });
-    await expect(deleted).rejects.toThrow('No workflow instance with id "refund-o-5".');
+    expect(await deleted).toMatchObject({ name: 'WorkflowNotFoundError', message: 'No workflow instance with id "refund-o-5".' });
   });
 
   it('rejects at once when the application shuts down while it waits, without waiting for its store', async () => {
@@ -148,6 +149,36 @@ describe('result()', () => {
     await node.close();
     vi.restoreAllMocks();
     expect(await waiting).toEqual(new Error('The application shut down while waiting for the result of instance "refund-o-8".'));
+  });
+
+  it('stops waiting as the shutdown begins, and has its callers answer before the hook returns, as Nest then closes the HTTP server', async () => {
+    const node = await start();
+    await node.client.start(Refund, { orderId: 'o-9', amount: 100 }, { id: 'refund-o-9' });
+    const answers: string[] = [];
+    // A route answering some awaits after its wait ended, as through the app's interceptors and filters.
+    const answering = (async () => {
+      try {
+        await node.client.result('refund-o-9', { timeout: '1h' });
+      } catch (error) {
+        for (let i = 0; i < 50; i++) {
+          await null;
+        }
+        answers.push((error as Error).message);
+      }
+    })();
+
+    await node.client.beforeApplicationShutdown();
+    expect(answers).toEqual(['The application shut down while waiting for the result of instance "refund-o-9".']);
+    await answering;
+
+    // A wait that starts from now on rejects at once, without reading the store.
+    const get = vi.spyOn(node.store, 'get');
+    await expect(node.client.startAndWait(Quote, { items: 1 }, { id: 'quote-late' })).rejects.toThrow(
+      'The application shut down while waiting for the result of instance "quote-late".',
+    );
+    expect(get).not.toHaveBeenCalled();
+    vi.restoreAllMocks();
+    expect(await node.client.getStatus('quote-late')).toMatchObject({ status: 'pending' });
   });
 
   it("sees an instance another process runs by reading the store, without that process's events", async () => {

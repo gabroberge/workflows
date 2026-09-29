@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { Inject, Injectable, type Type } from '@nestjs/common';
+import { Inject, Injectable, type BeforeApplicationShutdown, type Type } from '@nestjs/common';
 import { systemClock } from '../utils/clock.util.js';
 import { runTimeoutMs, toMs } from '../utils/duration.util.js';
 import type { WorkflowClock } from '../interfaces/workflow-clock.interface.js';
@@ -37,13 +37,22 @@ import type {
 } from '../interfaces/workflow-client.interface.js';
 import { WorkflowStateError } from '../errors/workflow-state.error.js';
 import { WorkflowEvents } from '../events/workflow-events.service.js';
-import type { WorkflowEvent } from '../events/workflow-events.interface.js';
+import type {
+  WorkflowCancelledEvent,
+  WorkflowCompensationFailedEvent,
+  WorkflowCompletedEvent,
+  WorkflowDeletedEvent,
+  WorkflowEvent,
+  WorkflowFailedEvent,
+} from '../events/workflow-events.interface.js';
 import type { SerializedWorkflowError } from '../interfaces/serialized-workflow-error.interface.js';
 
 /** Starts, signals, inspects and cancels workflow instances. Works with or without a local worker. */
 @Injectable()
-export class WorkflowClient {
+export class WorkflowClient implements BeforeApplicationShutdown {
   private readonly clock: WorkflowClock;
+  /** Aborted as the application starts shutting down: `result()` stops waiting. */
+  private readonly shutdown = new AbortController();
 
   constructor(
     private readonly storage: WorkflowStorage,
@@ -60,6 +69,18 @@ export class WorkflowClient {
   /** Read at each call, never in the constructor: sources register while providers are created. */
   private get store(): EncodedWorkflowStore {
     return this.storage[ENGINE_STORE];
+  }
+
+  /**
+   * Ends the waits of `result()` and `startAndWait()`. Nest closes the HTTP server after this hook, and the server
+   * waits for the requests in flight: a route still waiting would hold the shutdown up to its wait's timeout. It runs
+   * after `onModuleDestroy`, where the worker drains, so an instance that ends meanwhile answers with its result.
+   */
+  async beforeApplicationShutdown(): Promise<void> {
+    this.shutdown.abort();
+    // The routes that stopped waiting answer first: the server closes only the connections idle by then, and one that
+    // answers later stays open until its keep-alive timeout (72 seconds on Fastify), holding the shutdown that long.
+    await new Promise((resolve) => setImmediate(resolve));
   }
 
   /**
@@ -136,45 +157,47 @@ export class WorkflowClient {
    * `WorkflowFailedError` (its `status` is `failed`, `cancelled` or `compensation_failed`, its
    * `cause` the instance's error). Rejects with `WorkflowResultTimeoutError` past `timeout` (the
    * instance keeps running), `WorkflowNotFoundError` for an unknown id or one deleted while
-   * waiting, and an `Error` as soon as the application shuts down. An instance run by this
-   * process's worker is seen the moment it ends; one run elsewhere, at the next read of the store
-   * (every 25ms at first, backing off to every second).
+   * waiting, and an `Error` as soon as the application starts shutting down. An instance run by
+   * this process's worker is seen the moment it ends, also while the worker drains at shutdown;
+   * one run elsewhere, at the next read of the store (every 25ms at first, backing off to every
+   * second).
    */
   async result<O = unknown>(id: string, options: WorkflowResultOptions = {}): Promise<Journaled<O>> {
     const timeoutMs = options.timeout === undefined ? Infinity : toMs(options.timeout);
     const deadline = performance.now() + timeoutMs;
     options.signal?.throwIfAborted();
 
-    let ended = false;
-    let closed = false;
-    let close!: () => void;
-    const closing = new Promise<typeof SHUT_DOWN>((resolve) => (close = () => resolve(SHUT_DOWN)));
+    // An end event of this process's worker carries the outcome, so it needs no read, and the shutdown ends the wait:
+    // either settles a read in flight. Past the shutdown, a read would answer the route after Nest closed the HTTP
+    // server, which closes only the connections idle by then, and the database closes with the application.
+    let ended: WorkflowEndedEvent | undefined;
+    let stopped = this.shutdown.signal.aborted;
+    let settle!: () => void;
+    const settled = new Promise<typeof SETTLED>((resolve) => (settle = () => resolve(SETTLED)));
     let wake: (() => void) | undefined;
-    const nudge = () => {
-      ended = true;
-      wake?.();
+    const nudge = () => wake?.();
+    const stop = () => {
+      stopped = true;
+      settle();
+      nudge();
     };
-    const subscription = this.events.events$.subscribe({
-      next: (event) => {
-        if (event.id === id && ENDED_EVENTS.has(event.type)) {
-          nudge();
-        }
-      },
-      complete: () => {
-        closed = true;
-        close();
+    const subscription = this.events.events$.subscribe((event) => {
+      if (event.id === id && isEnded(event)) {
+        ended = event;
+        settle();
         nudge();
-      },
+      }
     });
+    this.shutdown.signal.addEventListener('abort', stop);
     options.signal?.addEventListener('abort', nudge);
 
     try {
       for (let delay = 25; ; delay = Math.min(delay * 2, 1_000)) {
-        ended = false;
-        // The application's database closes with it: a read then may fail or never settle, so none waits past the
-        // shutdown, and none starts after it.
-        const instance = closed ? SHUT_DOWN : await Promise.race([this.store.get(id), closing]);
-        if (instance === SHUT_DOWN) {
+        const instance = ended || stopped ? SETTLED : await Promise.race([this.store.get(id), settled]);
+        if (ended) {
+          return outcome<O>(ended);
+        }
+        if (instance === SETTLED) {
           throw new Error(`The application shut down while waiting for the result of instance "${id}".`);
         }
         if (!instance) {
@@ -192,19 +215,18 @@ export class WorkflowClient {
         if (remaining <= 0) {
           throw new WorkflowResultTimeoutError(id, timeoutMs);
         }
-        if (!ended) {
-          await new Promise<void>((resolve) => {
-            const timer = setTimeout(resolve, Math.min(delay, remaining));
-            wake = () => {
-              clearTimeout(timer);
-              resolve();
-            };
-          });
-          wake = undefined;
-        }
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, Math.min(delay, remaining));
+          wake = () => {
+            clearTimeout(timer);
+            resolve();
+          };
+        });
+        wake = undefined;
       }
     } finally {
       subscription.unsubscribe();
+      this.shutdown.signal.removeEventListener('abort', stop);
       options.signal?.removeEventListener('abort', nudge);
     }
   }
@@ -503,12 +525,34 @@ export class WorkflowClient {
 }
 
 const FINISHED: WorkflowStatus[] = ['completed', 'failed', 'cancelled', 'compensation_failed'];
-/** What a read of `result()` gives way to once the application shut down. */
-const SHUT_DOWN = Symbol('shut down');
-const ENDED_EVENTS = new Set<WorkflowEvent['type']>(['workflow-completed', 'workflow-failed', 'workflow-cancelled', 'workflow-compensation-failed', 'workflow-deleted']);
+/** What a read of `result()` gives way to: an end event of this process's worker, or the shutdown. */
+const SETTLED = Symbol('settled');
+
+/** The events after which an instance never runs again: its end, or its deletion. */
+type WorkflowEndedEvent = WorkflowCompletedEvent | WorkflowFailedEvent | WorkflowCancelledEvent | WorkflowCompensationFailedEvent | WorkflowDeletedEvent;
+const FAILURES: Partial<Record<WorkflowEvent['type'], WorkflowFailureStatus>> = {
+  'workflow-failed': 'failed',
+  'workflow-cancelled': 'cancelled',
+  'workflow-compensation-failed': 'compensation_failed',
+};
+
+function isEnded(event: WorkflowEvent): event is WorkflowEndedEvent {
+  return event.type === 'workflow-completed' || event.type === 'workflow-deleted' || FAILURES[event.type] !== undefined;
+}
+
+/** What `result()` settles with on an end event, which carries what the worker stored: no read needed. */
+function outcome<O>(event: WorkflowEndedEvent): Journaled<O> {
+  if (event.type === 'workflow-completed') {
+    return event.output as Journaled<O>;
+  }
+  if (event.type === 'workflow-deleted') {
+    throw new WorkflowNotFoundError(`No workflow instance with id "${event.id}".`);
+  }
+  throw failure({ id: event.id, workflow: event.workflow, status: FAILURES[event.type]!, error: event.error });
+}
 
 /** What `result()` rejects with for an instance that ended without completing. */
-function failure(instance: WorkflowInstance): WorkflowFailedError {
+function failure(instance: Pick<WorkflowInstance, 'id' | 'workflow' | 'status' | 'error'>): WorkflowFailedError {
   const status = instance.status as WorkflowFailureStatus;
   const cause = instance.error ?? { name: 'Error', message: 'Unknown failure.' };
   return new WorkflowFailedError(`Instance "${instance.id}" of workflow "${instance.workflow}" ${status.replace('_', ' ')}: ${cause.name}: ${cause.message}`, {
