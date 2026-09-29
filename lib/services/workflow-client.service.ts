@@ -13,6 +13,7 @@ import { WorkflowResultTimeoutError } from '../errors/workflow-result-timeout.er
 import { normalize } from '../utils/normalize.util.js';
 import { assertSameInstance, newInstance } from '../utils/new-instance.util.js';
 import { signalName, type WorkflowSignal } from '../signals/workflow.signal.js';
+import type { EncodedWorkflowStore } from '../storage/encoded-workflow.store.js';
 import { ENGINE_STORE, WorkflowStorage } from '../storage/workflow.storage.js';
 import { stepSignalId, stepStartId } from '../utils/step-scope.util.js';
 import type { WorkflowInstanceDetails, WorkflowPurgeResult, WorkflowStore } from '../interfaces/workflow-store.interface.js';
@@ -57,7 +58,7 @@ export class WorkflowClient {
   }
 
   /** Read at each call, never in the constructor: sources register while providers are created. */
-  private get store(): WorkflowStore {
+  private get store(): EncodedWorkflowStore {
     return this.storage[ENGINE_STORE];
   }
 
@@ -120,8 +121,8 @@ export class WorkflowClient {
     if (options.children) {
       details.children = [];
       for (let offset = 0; ; offset += 500) {
-        const page = await this.store.list({ parentId: id, limit: 500, offset });
-        details.children.push(...page);
+        const page = await this.store.inner.list({ parentId: id, limit: 500, offset });
+        details.children.push(...(await Promise.all(page.map((child) => this.store.readableInstance(child)))));
         if (page.length < 500) {
           break;
         }
@@ -237,7 +238,8 @@ export class WorkflowClient {
       return [];
     }
 
-    return this.store.list({
+    // Read as stored, then decoded one by one: one no codec can read any more is listed without its payloads.
+    const instances = await this.store.inner.list({
       limit,
       offset,
       ...(status ? { status } : {}),
@@ -246,6 +248,7 @@ export class WorkflowClient {
       ...(filter.parentId !== undefined ? { parentId: filter.parentId } : {}),
       ...(filter.scheduleId !== undefined ? { scheduleId: filter.scheduleId } : {}),
     });
+    return Promise.all(instances.map((instance) => this.store.readableInstance(instance)));
   }
 
   /**
@@ -275,7 +278,8 @@ export class WorkflowClient {
 
   private async stop(id: string, reason: string | undefined, terminate: boolean): Promise<WorkflowCancelResult> {
     const accepted = await this.store.requestCancel(id, { reason: reason ?? null, now: this.clock.now(), terminate });
-    const details = await this.store.get(id);
+    // Accepted is accepted: an instance whose payloads no codec can read any more is returned as stored.
+    const details = await this.store.get(id).catch(() => this.store.inner.get(id));
     if (!details) {
       throw new WorkflowNotFoundError(`No workflow instance with id "${id}".`);
     }
@@ -411,14 +415,15 @@ export class WorkflowClient {
    * without `force`.
    */
   async delete(id: string, options: WorkflowDeleteOptions = {}): Promise<void> {
-    const details = await this.store.get(id);
+    // Read as stored: deleting needs no payload, so an instance no codec can read any more can go too.
+    const details = await this.store.inner.get(id);
     if (!details) {
       throw new WorkflowNotFoundError(`No workflow instance with id "${id}".`);
     }
 
     const deleted = await this.store.delete(id, options.force ? ALL : FINISHED);
     if (!deleted) {
-      const current = await this.store.get(id);
+      const current = await this.store.inner.get(id);
       if (!current) {
         throw new WorkflowNotFoundError(`No workflow instance with id "${id}".`);
       }

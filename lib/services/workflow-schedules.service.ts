@@ -10,8 +10,9 @@ import type {
   WorkflowSchedulePreviewOptions,
   WorkflowSchedulePreviewSpec,
 } from '../interfaces/workflow-schedule.interface.js';
-import type { WorkflowScheduleRecord, WorkflowStore } from '../interfaces/workflow-store.interface.js';
+import type { WorkflowScheduleRecord } from '../interfaces/workflow-store.interface.js';
 import type { WorkflowsModuleOptions } from '../interfaces/workflows-module-options.interface.js';
+import type { EncodedWorkflowStore } from '../storage/encoded-workflow.store.js';
 import { ENGINE_STORE, WorkflowStorage } from '../storage/workflow.storage.js';
 import { systemClock } from '../utils/clock.util.js';
 import { normalize } from '../utils/normalize.util.js';
@@ -41,7 +42,7 @@ export class WorkflowSchedules {
   }
 
   /** Read at each call, never in the constructor: sources register while providers are created. */
-  private get store(): WorkflowStore {
+  private get store(): EncodedWorkflowStore {
     return this.storage[ENGINE_STORE];
   }
 
@@ -72,12 +73,16 @@ export class WorkflowSchedules {
       throw new TypeError(`${owner}: its input is not JSON-serializable: ${(error as Error).message}`);
     }
 
-    const saved = await this.scheduler.modify(id, (current) => {
-      if (current?.declared) {
-        throw declaredError(current);
-      }
-      return this.scheduler.fields(current, { workflow: workflow.name, declared: false, spec, input });
-    });
+    const saved = await this.scheduler.modify(
+      id,
+      (current) => {
+        if (current?.declared) {
+          throw declaredError(current);
+        }
+        return this.scheduler.fields(current, { workflow: workflow.name, declared: false, spec, input });
+      },
+      { read: (id) => this.scheduler.readReplacing(id) },
+    );
     this.worker.kick();
     return this.scheduler.view(saved!);
   }
@@ -99,8 +104,9 @@ export class WorkflowSchedules {
       return [];
     }
 
-    const records = await this.store.listSchedules({ limit, offset, ...(filter.workflow !== undefined ? { workflow: filter.workflow } : {}) });
-    return records.map((record) => this.scheduler.view(record));
+    // Read as stored, then decoded one by one: one whose input no codec can read any more doesn't hide the others.
+    const records = await this.store.inner.listSchedules({ limit, offset, ...(filter.workflow !== undefined ? { workflow: filter.workflow } : {}) });
+    return Promise.all(records.map((record) => this.scheduler.readableView(record)));
   }
 
   /**
@@ -108,7 +114,7 @@ export class WorkflowSchedules {
    * `WorkflowStateError` for a schedule a workflow declares: remove it from the code, or `pause()` it.
    */
   async remove(id: string): Promise<boolean> {
-    const record = await this.store.getSchedule(id);
+    const record = await this.store.inner.getSchedule(id);
     if (!record) {
       return false;
     }
@@ -124,13 +130,17 @@ export class WorkflowSchedules {
    * schedule stays paused across deploys. Throws `WorkflowNotFoundError` for an unknown id.
    */
   async pause(id: string): Promise<WorkflowSchedule> {
-    const saved = await this.scheduler.modify(id, (current) => {
-      if (!current) {
-        throw notFound(id);
-      }
-      return current.paused ? null : { ...fieldsOf(current), paused: true, releaseLease: true };
-    });
-    return this.scheduler.view(saved!);
+    const saved = await this.scheduler.modify(
+      id,
+      (current) => {
+        if (!current) {
+          throw notFound(id);
+        }
+        return current.paused ? null : { ...fieldsOf(current), paused: true, releaseLease: true };
+      },
+      { asStored: true },
+    );
+    return this.scheduler.readableView(saved!);
   }
 
   /**
@@ -139,21 +149,25 @@ export class WorkflowSchedules {
    */
   async resume(id: string): Promise<WorkflowSchedule> {
     const now = this.clock.now();
-    const saved = await this.scheduler.modify(id, (current) => {
-      if (!current) {
-        throw notFound(id);
-      }
-      if (!current.paused) {
-        return null;
-      }
+    const saved = await this.scheduler.modify(
+      id,
+      (current) => {
+        if (!current) {
+          throw notFound(id);
+        }
+        if (!current.paused) {
+          return null;
+        }
 
-      const spec = current.spec as ScheduleSpec;
-      const previous = current.state as ScheduleState;
-      const state: ScheduleState = { ...previous, next: limitReached(spec, previous.runs) ? null : nextOccurrence(spec, now) };
-      return { ...fieldsOf(current), paused: false, state, wakeAt: wakeAt(state, now), releaseLease: true };
-    });
+        const spec = current.spec as ScheduleSpec;
+        const previous = current.state as ScheduleState;
+        const state: ScheduleState = { ...previous, next: limitReached(spec, previous.runs) ? null : nextOccurrence(spec, now) };
+        return { ...fieldsOf(current), paused: false, state, wakeAt: wakeAt(state, now), releaseLease: true };
+      },
+      { asStored: true },
+    );
     this.worker.kick();
-    return this.scheduler.view(saved!);
+    return this.scheduler.readableView(saved!);
   }
 
   /**
@@ -201,7 +215,7 @@ export class WorkflowSchedules {
     let spec: ScheduleSpec;
     let left = Infinity;
     if (typeof schedule === 'string') {
-      const record = await this.store.getSchedule(schedule);
+      const record = await this.store.inner.getSchedule(schedule);
       if (!record) {
         throw notFound(schedule);
       }

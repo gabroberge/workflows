@@ -492,7 +492,8 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
 
     // Every child, oldest first: the list's order doesn't change while the statuses do.
     for (let offset = 0; ; offset += CHILDREN_PAGE) {
-      const children = await this.store.list({ parentId: instance.id, limit: CHILDREN_PAGE, offset });
+      // Read as stored: closing a child needs no payload, and one no codec can read any more is closed too.
+      const children = await this.storage[ENGINE_STORE].inner.list({ parentId: instance.id, limit: CHILDREN_PAGE, offset });
       for (const child of children) {
         if (!RUNNABLE.includes(child.status) || child.parentClose === 'abandon' || child.parentClose === null) {
           continue;

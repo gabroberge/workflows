@@ -365,6 +365,64 @@ describe('a codec', () => {
     expect(error).toHaveBeenCalledWith(expect.stringContaining('Schedule "stored-under-k1" can\'t be read, so it isn\'t run'));
   });
 
+  it("still deletes, cancels and counts for overlap an instance it can't read", async () => {
+    let node = await start(aes({ k1: KEY_1 }, 'k1'), [ReviewWorkflow]);
+    await node.client.schedules.upsert('reviews', { workflow: ReviewWorkflow, every: '1h', input: { orderId: SECRET } });
+    clock.advance('1h');
+    await node.worker.drain();
+    const first = (await node.client.list({ scheduleId: 'reviews' }))[0]!;
+    await node.client.start(ReviewWorkflow, { orderId: SECRET }, { id: 'lost' });
+    await nodes.pop()!.close();
+
+    vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    node = await start(aes({ k2: KEY_2 }, 'k2'), [ReviewWorkflow]);
+    // The schedule's own input is under k1 too: upsert() gives it a new one.
+    await node.client.schedules.upsert('reviews', { workflow: ReviewWorkflow, every: '1h', input: { orderId: 'o-2' } });
+    clock.advance('1h');
+    await node.worker.drain();
+    expect(await node.client.list({ scheduleId: 'reviews' })).toHaveLength(1);
+    expect(await node.client.schedules.get('reviews')).toMatchObject({ runs: 1, nextAt: clock.now() + 3_600_000 });
+
+    expect(await node.client.cancel('lost', 'Unreadable.')).toMatchObject({ id: 'lost', accepted: true });
+    await node.client.delete(first.id, { force: true });
+    clock.advance('1h');
+    await node.worker.drain();
+    expect(await node.client.list({ scheduleId: 'reviews' })).toMatchObject([{ input: { orderId: 'o-2' } }]);
+  });
+
+  it("lists, pauses, resumes, replaces and removes a schedule whose input it can't read", async () => {
+    let node = await start(aes({ k1: KEY_1 }, 'k1'), [ReviewWorkflow]);
+    await node.client.schedules.upsert('under-k1', { workflow: ReviewWorkflow, every: '1h', input: { orderId: SECRET } });
+    await node.client.schedules.upsert('other', { workflow: ReviewWorkflow, every: '2h', input: { orderId: 'o-1' } });
+    await nodes.pop()!.close();
+
+    vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    node = await start(aes({ k2: KEY_2 }, 'k2'), [ReviewWorkflow]);
+    await expect(node.client.schedules.get('under-k1')).rejects.toThrow('was encrypted with key "k1", which isn\'t in keys');
+    const listed = await node.client.schedules.list();
+    expect(listed.map((schedule) => [schedule.id, schedule.input])).toEqual([
+      ['other', undefined],
+      ['under-k1', undefined],
+    ]);
+    expect(await node.client.schedules.pause('under-k1')).toMatchObject({ paused: true });
+    expect(await node.client.schedules.resume('under-k1')).toMatchObject({ paused: false });
+    expect(await node.client.schedules.upsert('under-k1', { workflow: ReviewWorkflow, every: '1h', input: { orderId: 'o-3' } })).toMatchObject({
+      input: { orderId: 'o-3' },
+    });
+    expect((await node.store.getSchedule('under-k1'))!.input).toMatch(/^\$wf1:aes-256-gcm:k2\./);
+    expect(await node.client.schedules.remove('other')).toBe(true);
+  });
+
+  it("reads a codec's promise from any library", async () => {
+    const thenable = <T>(value: T) => ({ then: (resolve: (value: T) => void) => resolve(value) });
+    const codec = { id: 'thenable', encode: (value: unknown) => thenable(`t:${JSON.stringify(value)}`), decode: (data: string) => JSON.parse(data.slice(2)) };
+    const node = await start(codec, [ReviewWorkflow]);
+    await node.client.start(ReviewWorkflow, { orderId: 'o-1' }, { id: 'thenable' });
+    expect((await node.store.get('thenable'))!.input).toBe('$wf1:thenable:t:{"orderId":"o-1"}');
+    expect(await node.client.getStatus('thenable')).toMatchObject({ input: { orderId: 'o-1' } });
+  });
+
   it("leaves an instance it can't read to its lease, and runs the others", async () => {
     let node = await start(aes());
     await node.client.start(RefundWorkflow, { orderId: 'o-1', card: SECRET }, { id: 'unreadable' });

@@ -122,7 +122,7 @@ export class WorkflowScheduler implements OnApplicationBootstrap {
           }
           return this.declaredChange(current, schedule);
         },
-        (id) => this.readDeclared(id),
+        { read: (id) => this.readReplacing(id) },
       );
     }
 
@@ -147,13 +147,29 @@ export class WorkflowScheduler implements OnApplicationBootstrap {
     return same ? null : this.fields(current, { workflow: schedule.workflow, declared: true, spec: schedule.spec, input });
   }
 
-  /** A declared schedule, with an input no codec can read any more (a dropped key) as unreadable: the code's replaces it. */
-  private async readDeclared(id: string): Promise<WorkflowScheduleRecord | null> {
+  /**
+   * A schedule to save with a new input (the code's, or `upsert()`'s): one with an input no codec can read any more
+   * (a dropped key) is read as it is stored, its input marked unreadable, so the new input can replace it.
+   */
+  async readReplacing(id: string): Promise<WorkflowScheduleRecord | null> {
     try {
       return await this.store.getSchedule(id);
     } catch {
       const record = await this.store.inner.getSchedule(id);
       return record && { ...record, input: UNREADABLE };
+    }
+  }
+
+  /** How `WorkflowSchedules` shows a schedule as stored: without its input, if no codec can read it any more. */
+  async readableView(record: WorkflowScheduleRecord): Promise<WorkflowSchedule> {
+    try {
+      return this.view(await this.store.decodeSchedule(record));
+    } catch (error) {
+      if (!this.warned.has(`unreadable:${record.id}`)) {
+        this.warned.add(`unreadable:${record.id}`);
+        this.logger.warn(`Schedule "${record.id}" is shown without its input, which can't be read: ${(error as Error).message}`);
+      }
+      return this.view({ ...record, input: null });
     }
   }
 
@@ -199,13 +215,16 @@ export class WorkflowScheduler implements OnApplicationBootstrap {
 
   /**
    * Applies `change` to the stored schedule until it lands: a write conditional on the revision it read. `change`
-   * returns the new fields, or `null` to leave it. Returns the schedule as stored (`null`: none).
+   * returns the new fields, or `null` to leave it. Returns the schedule as stored (`null`: none). With `asStored`,
+   * the schedule is read and saved as the store holds it, its input untouched (a pause needs no codec).
    */
   async modify(
     id: string,
     change: (current: WorkflowScheduleRecord | null) => ScheduleFields | null,
-    read: (id: string) => Promise<WorkflowScheduleRecord | null> = (id) => this.store.getSchedule(id),
+    options: { read?: (id: string) => Promise<WorkflowScheduleRecord | null>; asStored?: boolean } = {},
   ): Promise<WorkflowScheduleRecord | null> {
+    const store = options.asStored ? this.store.inner : this.store;
+    const read = options.read ?? ((id: string) => store.getSchedule(id));
     for (let attempt = 0; attempt < 10; attempt++) {
       const current = await read(id);
       const fields = change(current);
@@ -213,7 +232,7 @@ export class WorkflowScheduler implements OnApplicationBootstrap {
         return current;
       }
 
-      const saved = await this.store.saveSchedule({ ...fields, id, expectRevision: current?.revision ?? null, now: this.clock.now() });
+      const saved = await store.saveSchedule({ ...fields, id, expectRevision: current?.revision ?? null, now: this.clock.now() });
       if (saved) {
         return saved;
       }
@@ -356,7 +375,8 @@ export class WorkflowScheduler implements OnApplicationBootstrap {
 
   /** The unfinished instances the schedule started. */
   private async running(schedule: string): Promise<string[]> {
-    const instances = await this.store.list({ scheduleId: schedule, status: UNFINISHED, limit: BATCH, offset: 0 });
+    // Read as stored: only the ids count, and an instance no codec can read any more still runs.
+    const instances = await this.store.inner.list({ scheduleId: schedule, status: UNFINISHED, limit: BATCH, offset: 0 });
     return instances.map((instance) => instance.id);
   }
 

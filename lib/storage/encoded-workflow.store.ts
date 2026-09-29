@@ -137,6 +137,7 @@ export class PayloadCodecs {
  */
 export class EncodedWorkflowStore implements WorkflowStore {
   private static readonly logger = new Logger('Workflows');
+  private readonly unreadable = new Set<string>();
   readonly createInTransaction?: WorkflowStore['createInTransaction'];
   readonly signalInTransaction?: WorkflowStore['signalInTransaction'];
 
@@ -326,6 +327,23 @@ export class EncodedWorkflowStore implements WorkflowStore {
     };
   }
 
+  /**
+   * An instance as stored, decoded; one no listed codec can decode any more, without its payloads (its error's name
+   * kept), logged once: a listing shows it instead of failing whole.
+   */
+  async readableInstance<T extends WorkflowInstance>(instance: T): Promise<T> {
+    try {
+      return await this.decodeInstance(instance);
+    } catch (error) {
+      if (!this.unreadable.has(instance.id)) {
+        this.unreadable.add(instance.id);
+        EncodedWorkflowStore.logger.warn(`Instance "${instance.id}" is listed without its payloads, which can't be read: ${(error as Error).message}`);
+      }
+      const { name } = instance.error ?? {};
+      return { ...instance, input: undefined, output: undefined, customStatus: null, cancelReason: null, error: name === undefined ? null : { name, message: '(unreadable)' } };
+    }
+  }
+
   private async decodeInstance<T extends WorkflowInstance>(instance: T): Promise<T> {
     if (![instance.input, instance.output, instance.error?.message, instance.customStatus, instance.cancelReason].some(encoded)) {
       return instance;
@@ -342,7 +360,8 @@ export class EncodedWorkflowStore implements WorkflowStore {
     return { ...instance, input, ...('output' in instance ? { output } : {}), error, customStatus, cancelReason: cancelReason as string | null };
   }
 
-  private async decodeSchedule(record: WorkflowScheduleRecord): Promise<WorkflowScheduleRecord> {
+  /** A schedule as stored, with its input decoded. Throws if no listed codec can decode it. */
+  async decodeSchedule(record: WorkflowScheduleRecord): Promise<WorkflowScheduleRecord> {
     return encoded(record.input) ? { ...record, input: await this.codecs.decode(record.input, { field: 'input', schedule: record.id }) } : record;
   }
 
@@ -380,11 +399,16 @@ function entryEncoded(entry: WorkflowJournalEntry): boolean {
 }
 
 function then<T, R>(value: Maybe<T>, next: (value: T) => Maybe<R>): Maybe<R> {
-  return value instanceof Promise ? value.then(next) : next(value);
+  return thenable(value) ? Promise.resolve(value).then(next) : next(value as T);
 }
 
 function toPromise<T>(value: Maybe<T>): Promise<T> {
-  return value instanceof Promise ? value : Promise.resolve(value);
+  return Promise.resolve(value);
+}
+
+/** A promise, from this realm or not (a codec's library may bring its own). */
+function thenable<T>(value: Maybe<T>): value is Promise<T> {
+  return typeof (value as { then?: unknown } | null)?.then === 'function';
 }
 
 function where(context: WorkflowPayloadContext): string {
