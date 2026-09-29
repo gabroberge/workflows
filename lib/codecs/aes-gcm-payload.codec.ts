@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
+import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from 'node:crypto';
 import { deflateRawSync, inflateRawSync } from 'node:zlib';
 import type { WorkflowPayloadCodec, WorkflowPayloadContext } from '../interfaces/workflow-payload-codec.interface.js';
 
@@ -15,17 +15,20 @@ export interface AesGcmPayloadCodecOptions {
   compress?: number | false;
 }
 
+const SALT_BYTES = 16;
 const IV_BYTES = 12;
 const TAG_BYTES = 16;
+const HEADER_BYTES = SALT_BYTES + IV_BYTES;
 /** The first byte of every plaintext: its format. Bit 0: deflated. */
 const DEFLATED = 1;
 
 /**
- * Encrypts payloads with AES-256-GCM (`node:crypto`): a random 96-bit IV per payload, and the payload's context as
- * additional authenticated data, so a payload that was changed, or moved to another instance, journal entry or
- * field, fails to decrypt instead of being read. The key's id is stored with each payload, so rotating keys needs
- * no migration: payloads are decrypted with the key that encrypted them, and written with the current one.
- * Payloads of 1 KiB or more are deflated first. Its `id` is `'aes-256-gcm'`.
+ * Encrypts payloads with AES-256-GCM (`node:crypto`), under a key derived for each payload from the configured one
+ * (HKDF-SHA256 with a random salt) and a random IV, so no key nears the 2^32 encryptions random IVs allow, and with
+ * the payload's context as additional authenticated data, so a payload that was changed, or moved to another
+ * instance, journal entry or field, fails to decrypt instead of being read. The key's id is stored with each
+ * payload, so rotating keys needs no migration: payloads are decrypted with the key that encrypted them, and
+ * written with the current one. Payloads of 1 KiB or more are deflated first. Its `id` is `'aes-256-gcm'`.
  *
  * ```ts
  * WorkflowsModule.forRoot({
@@ -67,11 +70,11 @@ export class AesGcmPayloadCodec implements WorkflowPayloadCodec {
     const deflated = json.length >= this.threshold;
     const plaintext = Buffer.concat([Buffer.of(deflated ? DEFLATED : 0), deflated ? deflateRawSync(json) : json]);
 
-    const iv = randomBytes(IV_BYTES);
-    const cipher = createCipheriv('aes-256-gcm', this.keys.get(this.current)!, iv);
+    const header = randomBytes(HEADER_BYTES);
+    const cipher = createCipheriv('aes-256-gcm', derived(this.keys.get(this.current)!, header), header.subarray(SALT_BYTES));
     cipher.setAAD(associated(this.current, context));
     const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
-    return `${this.current}.${Buffer.concat([iv, ciphertext, cipher.getAuthTag()]).toString('base64url')}`;
+    return `${this.current}.${Buffer.concat([header, ciphertext, cipher.getAuthTag()]).toString('base64url')}`;
   }
 
   decode(data: string, context: WorkflowPayloadContext): unknown {
@@ -88,10 +91,10 @@ export class AesGcmPayloadCodec implements WorkflowPayloadCodec {
     const bytes = Buffer.from(data.slice(dot + 1), 'base64url');
     let plaintext: Buffer;
     try {
-      const decipher = createDecipheriv('aes-256-gcm', key, bytes.subarray(0, IV_BYTES));
+      const decipher = createDecipheriv('aes-256-gcm', derived(key, bytes), bytes.subarray(SALT_BYTES, HEADER_BYTES));
       decipher.setAAD(associated(id, context));
       decipher.setAuthTag(bytes.subarray(bytes.length - TAG_BYTES));
-      plaintext = Buffer.concat([decipher.update(bytes.subarray(IV_BYTES, bytes.length - TAG_BYTES)), decipher.final()]);
+      plaintext = Buffer.concat([decipher.update(bytes.subarray(HEADER_BYTES, bytes.length - TAG_BYTES)), decipher.final()]);
     } catch {
       throw new Error(`AesGcmPayloadCodec: a payload of ${describe(context)} failed authentication: it was changed, or encrypted for another place.`);
     }
@@ -109,6 +112,11 @@ function keyBytes(id: string, key: string | Uint8Array): Buffer {
     );
   }
   return bytes;
+}
+
+/** The payload's own key: HKDF-SHA256 of the configured key, with the salt that starts the payload's bytes. */
+function derived(key: Buffer, bytes: Buffer): Buffer {
+  return Buffer.from(hkdfSync('sha256', key, bytes.subarray(0, SALT_BYTES), 'nestjs-workflows payload', 32));
 }
 
 /** The additional authenticated data: the key's id and where the payload is stored. */
