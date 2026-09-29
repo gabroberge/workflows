@@ -104,6 +104,17 @@ class StockReport {
   }
 }
 
+/** The same workflow in a deployment that doesn't declare the schedule (yet, or any more). */
+@Workflow('stock-report')
+class StockReportUndeclared {
+  async run() {}
+}
+
+@Workflow('also-weekly', { schedules: [{ id: 'weekly-digest', every: '7d' }] })
+class ClashingSchedule {
+  async run() {}
+}
+
 let db: TestDb;
 let clock: ManualWorkflowClock;
 let world: World;
@@ -204,7 +215,7 @@ describe('a declared schedule', () => {
   });
 });
 
-describe('a declared schedule whose input throws', () => {
+describe('a declared schedule, in edge cases', () => {
   it('skips an occurrence whose input function throws, logged, and starts the next', async () => {
     const error = vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
     const node = await start([StockReport]);
@@ -216,6 +227,24 @@ describe('a declared schedule whose input throws', () => {
     expect(world.calls.map((call) => call.key)).toEqual(['2']);
     expect(error).toHaveBeenCalledWith(`Schedule "stock-report" couldn't start its occurrence of ${iso(hours(1))}: The warehouse API is down.`);
     expect(await node.client.schedules.get('stock-report')).toMatchObject({ runs: 1, nextAt: hours(3) });
+  });
+
+  it('is left to a worker whose code declares it, when its input is a function', async () => {
+    const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const other = await start([StockReportUndeclared]);
+    const declaring = await start([StockReport]);
+
+    clock.set(hours(2));
+    expect(await other.worker.drain()).toBe(0);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Schedule "stock-report" computes its input with a function this worker\'s code doesn\'t declare'));
+    await declaring.worker.drain();
+    expect(world.calls.map((call) => call.key)).toEqual(['2']);
+  });
+
+  it('fails the startup when two workflows declare one id', async () => {
+    await expect(start([DigestWorkflow, ClashingSchedule])).rejects.toThrow(
+      'Schedule "weekly-digest" is declared by two workflows ("digest" and "also-weekly"). Give each schedule its own id.',
+    );
   });
 });
 
