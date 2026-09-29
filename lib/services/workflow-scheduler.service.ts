@@ -30,7 +30,7 @@ export interface ScheduleState {
    * before the instances are created and cleared after, so a worker that dies in between (or loses the lease)
    * leaves them to the next one, which makes them again: an occurrence's instance id makes that a no-op.
    */
-  pending: Array<{ at: number; cancel: string[] }>;
+  pending: Array<{ at: number; cancel: string[]; attempts?: number }>;
 }
 
 /** The fields `saveSchedule()` takes, without the condition. */
@@ -48,6 +48,8 @@ const ON_TIME_MS = 60_000;
 export const MAX_CATCH_UP = 100;
 /** Schedules one production leases at most; the rest wait for the next. */
 const BATCH = 100;
+/** How many times a production tries to start an occurrence the store refuses (about 5 minutes, backing off). */
+const MAX_START_ATTEMPTS = 10;
 const UNFINISHED: WorkflowStatus[] = ['pending', 'running', 'suspended', 'compensating'];
 
 /** The stored input of a declared schedule that no codec can read any more: never equal to the code's. */
@@ -346,27 +348,44 @@ export class WorkflowScheduler implements OnApplicationBootstrap {
     }
 
     const production: ScheduleProduction = { started: 0, cancelled: [] };
+    const retries: ScheduleState['pending'] = [];
     let skippedStarts = 0;
     for (const start of st.pending) {
-      for (const id of start.cancel) {
-        const reason = `Cancelled: schedule "${record.id}" started its occurrence of ${new Date(start.at).toISOString()} (overlap: 'cancel-previous').`;
-        if (await this.store.requestCancel(id, { reason, now, terminate: false })) {
-          production.cancelled.push(id);
+      const occurrence = new Date(start.at).toISOString();
+      try {
+        for (const id of start.cancel) {
+          const reason = `Cancelled: schedule "${record.id}" started its occurrence of ${occurrence} (overlap: 'cancel-previous').`;
+          if (await this.store.requestCancel(id, { reason, now, terminate: false })) {
+            production.cancelled.push(id);
+          }
         }
-      }
 
-      const started = await this.startOccurrence(record, spec, declared, workflow, start.at, now);
-      if (!started) {
-        skippedStarts++;
-      } else if (started.created) {
-        production.started++;
+        const started = await this.startOccurrence(record, spec, declared, workflow, start.at, now);
+        if (!started) {
+          skippedStarts++;
+        } else if (started.created) {
+          production.started++;
+        }
+      } catch (error) {
+        // The store refused the start: tried again (after a backoff) by the next production, a few times, so a
+        // start that can never be stored doesn't hold the schedule up forever.
+        const attempts = (start.attempts ?? 0) + 1;
+        const message = `Schedule "${record.id}" couldn't start its occurrence of ${occurrence} (attempt ${attempts} of ${MAX_START_ATTEMPTS})`;
+        this.logger.error(attempts < MAX_START_ATTEMPTS ? `${message}; it tries again.` : `${message}; it gives up on it.`, error as Error);
+        if (attempts < MAX_START_ATTEMPTS) {
+          retries.push({ ...start, attempts });
+        } else {
+          skippedStarts++;
+        }
       }
     }
 
-    // An occurrence that couldn't start (its input threw) doesn't count toward `limit`.
+    // An occurrence that couldn't start (its input threw, or the store kept refusing it) doesn't count toward `limit`.
     const runs = st.runs - skippedStarts;
-    const done: ScheduleState = { ...st, runs, next: st.next === null && !limitReached(spec, runs) ? nextOccurrence(spec, now) : st.next, pending: [] };
-    await this.store.writeSchedule(record.id, token, { now, state: done, wakeAt: wakeAt(done, now), release: true });
+    const done: ScheduleState = { ...st, runs, next: st.next === null && !limitReached(spec, runs) ? nextOccurrence(spec, now) : st.next, pending: retries };
+    const backoff = Math.min(1_000 * 2 ** (Math.max(0, ...retries.map((start) => start.attempts ?? 0)) - 1), 60_000);
+    const due = retries.length > 0 ? Math.min(now + backoff, wakeAt({ ...done, pending: [] }, now) ?? Infinity) : wakeAt(done, now);
+    await this.store.writeSchedule(record.id, token, { now, state: done, wakeAt: due, release: true });
     for (const range of skipped) {
       this.events.emit({ type: 'schedule-skipped', id: record.id, workflow: workflow.name, version: workflow.version, at: now, ...range });
     }

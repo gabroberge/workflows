@@ -476,23 +476,36 @@ describe('bounds and limits', () => {
 });
 
 describe('crashes and takeovers', () => {
-  it('finishes the start a worker decided on and never made, once, after its lease', async () => {
+  it('finishes the starts a worker decided on and died before recording, once, after its lease', async () => {
     const [a, b] = [await start(), await start()];
     const error = vi.spyOn(Logger.prototype, 'error').mockImplementation(() => {});
     await a.client.schedules.upsert('crashy', { workflow: TickWorkflow, every: '1h' });
-    const create = vi.spyOn(a.store, 'create').mockRejectedValueOnce(new Error('Connection terminated unexpectedly'));
+    await a.client.schedules.upsert('crashy-too', { workflow: TickWorkflow, every: '1h' });
+    const create = vi.spyOn(a.store, 'create');
+    // The worker records its decisions, creates the first instance, and dies before it records the starts done.
+    const writeSchedule = a.store.writeSchedule.bind(a.store);
+    let writes = 0;
+    vi.spyOn(a.store, 'writeSchedule').mockImplementation(async (...args) => {
+      if (++writes === 2) {
+        throw new Error('Connection terminated unexpectedly');
+      }
+      return writeSchedule(...args);
+    });
 
     clock.set(hours(1));
     await a.worker.drain();
-    expect(create).toHaveBeenCalledTimes(1);
     expect(error).toHaveBeenCalledWith(expect.stringContaining('Starting the occurrences of schedule "crashy" failed'), expect.any(Error));
-    expect(await a.client.list({ scheduleId: 'crashy' })).toEqual([]);
-    expect(await b.worker.drain()).toBe(0); // its lease holds
+    expect((await a.store.getSchedule('crashy'))!.state).toMatchObject({ pending: [{ at: hours(1) }] });
+    // The instances it made ran; the other schedule was produced; the schedule's lease holds.
+    expect((await a.client.list({ status: 'completed' })).map((instance) => instance.id).sort()).toEqual([`crashy-too@${iso(hours(1))}`, `crashy@${iso(hours(1))}`]);
+    expect(await b.worker.drain()).toBe(0);
 
     clock.advance('31s');
     await Promise.all([a.worker.drain(), b.worker.drain()]);
     expect((await a.client.list({ scheduleId: 'crashy' })).map((instance) => [instance.id, instance.status])).toEqual([[`crashy@${iso(hours(1))}`, 'completed']]);
+    expect(create.mock.calls.filter(([instance]) => instance.id === `crashy@${iso(hours(1))}`).length).toBeGreaterThanOrEqual(1);
     expect(await a.client.schedules.get('crashy')).toMatchObject({ runs: 1, nextAt: hours(2) });
+    expect((await a.store.getSchedule('crashy'))!.state).toMatchObject({ pending: [] });
   });
 
   it('pauses at once: a worker deciding the occurrences at that moment starts none it had not decided on', async () => {
@@ -528,6 +541,33 @@ describe('crashes and takeovers', () => {
       bufferedAt: null,
       nextAt: hours(2.5),
     });
+  });
+
+  it('tries a start the store keeps refusing a few times, backing off, then gives up on it and carries on', async () => {
+    const error = vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    const node = await start();
+    await node.client.schedules.upsert('refused', { workflow: TickWorkflow, every: '1h', overlap: 'allow' });
+    const create = node.store.create.bind(node.store);
+    const refused = vi.spyOn(node.store, 'create').mockImplementation(async (instance) => {
+      if (instance.id === `refused@${iso(hours(1))}`) {
+        throw new Error('value too long for type character varying(255)');
+      }
+      return create(instance);
+    });
+
+    clock.set(hours(1));
+    for (let i = 0; i < 20; i++) {
+      await node.worker.drain();
+      clock.advance('30s');
+    }
+    expect(refused.mock.calls.filter(([instance]) => instance.id === `refused@${iso(hours(1))}`)).toHaveLength(10);
+    expect(error).toHaveBeenCalledWith(`Schedule "refused" couldn't start its occurrence of ${iso(hours(1))} (attempt 10 of 10); it gives up on it.`, expect.any(Error));
+    expect(await node.client.schedules.get('refused')).toMatchObject({ runs: 0, nextAt: hours(2) });
+
+    clock.set(hours(2));
+    await node.worker.drain();
+    expect((await node.client.list({ scheduleId: 'refused' })).map((instance) => instance.id)).toEqual([`refused@${iso(hours(2))}`]);
+    expect(await node.client.schedules.get('refused')).toMatchObject({ runs: 1 });
   });
 
   it("leaves a retimed schedule's start in flight to the next worker, which makes it once", async () => {
