@@ -28,6 +28,8 @@ import {
   type WorkflowInstanceDetails,
   type WorkflowJournalEntry,
   type WorkflowRunner,
+  type WorkflowScheduleDeclaration,
+  type WorkflowScheduleOccurrence,
   type WorkflowsModuleAsyncOptions,
   type WorkflowsOptionsFactory,
 } from '../lib/index.js';
@@ -753,6 +755,31 @@ describe('types', () => {
     expectTypeOf<Journaled<[Date, () => void]>>().toEqualTypeOf<[string, null]>();
     expectTypeOf(JSON.parse(JSON.stringify(['a', undefined, () => 1]))).toEqualTypeOf<any>();
     expect(JSON.parse(JSON.stringify(['a', undefined, () => 1]))).toEqual(['a', null, null]);
+  });
+
+  it("types a declared schedule's input function with its occurrence, and its value as any JSON", async () => {
+    @Workflow('typed-schedule', {
+      schedules: [
+        { id: 'typed-hourly', every: '1h', input: ({ id, at }) => ({ schedule: id, hour: new Date(at).getUTCHours() }) },
+        { id: 'typed-daily', every: '1d', input: { schedule: 'typed-daily', hour: 0 } },
+      ],
+    })
+    class TypedSchedule {
+      async run(_ctx: WorkflowContext, input: { schedule: string; hour: number }) {
+        return input.hour;
+      }
+    }
+
+    type InputFunction = Extract<WorkflowScheduleDeclaration['input'], (...args: never[]) => unknown>;
+    expectTypeOf<Parameters<InputFunction>>().toEqualTypeOf<[occurrence: WorkflowScheduleOccurrence]>();
+    expectTypeOf<WorkflowScheduleDeclaration<{ week: string }>['input']>().toEqualTypeOf<
+      { week: string } | ((occurrence: WorkflowScheduleOccurrence) => { week: string }) | undefined
+    >();
+
+    const node = await start([TypedSchedule]);
+    clock.advance('1h');
+    await node.worker.drain();
+    expect(await node.client.list({ scheduleId: 'typed-hourly' })).toMatchObject([{ input: { schedule: 'typed-hourly', hour: 1 }, output: 1 }]);
   });
 
   it('infers start() input from the workflow class', async () => {

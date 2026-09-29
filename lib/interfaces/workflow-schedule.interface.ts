@@ -75,8 +75,14 @@ export interface WorkflowScheduleDeclaration<I = any> extends WorkflowScheduleOp
    * The input of the instances it starts: a JSON value, or a function of the occurrence, called by the worker
    * that starts it (`input: ({ at }) => ({ week: isoWeek(at) })`). Default: none.
    */
-  input?: I | ((occurrence: WorkflowScheduleOccurrence) => I);
+  input?: ((occurrence: WorkflowScheduleOccurrence) => I) | ScheduleInputValue<I>;
 }
+
+/**
+ * A declared schedule's input as a value. Without a type for it, any JSON value: not `I` itself, since `any` or
+ * `unknown` in the union would swallow the function beside it, and with it the occurrence's type for its parameter.
+ */
+type ScheduleInputValue<I> = unknown extends I ? string | number | boolean | object | null : I;
 
 /** What `WorkflowSchedules.upsert()` takes. */
 export interface UpsertWorkflowScheduleOptions<W = unknown> extends WorkflowScheduleOptions {
