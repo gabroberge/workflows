@@ -113,11 +113,12 @@ export interface WorkflowDecoratorOptions {
   rateLimit?: WorkflowRateLimit | WorkflowRateLimit[];
   /**
    * Starts instances on a schedule: a `cron` expression, an interval (`every`) or an RFC 5545 `rrule`, in a
-   * time zone (`tz`), with an `id` unique across the application. Kept in step with the code: a worker that
-   * starts saves the schedules its highest registered version of the workflow declares, and removes the ones
-   * it no longer does. Each occurrence starts one instance, whose id is `<schedule id>@<ISO time of the
-   * occurrence>`, however many workers there are; `WorkflowSchedules` pauses, resumes, triggers and lists
-   * them. Default: none.
+   * time zone (`tz`), with an `id` unique across the application. Kept in step with the code, also in a rolling
+   * deploy: a process saves and confirms the schedules its highest registered version of the workflow declares, at
+   * startup and every minute, and removes one its code no longer declares once no process whose code declares it
+   * has confirmed it for five minutes; it leaves a newer version's declaration as it is while a process of that
+   * code runs. Each occurrence starts one instance, whose id is `<schedule id>@<ISO time of the occurrence>`,
+   * however many workers there are; `WorkflowSchedules` pauses, resumes, triggers and lists them. Default: none.
    */
   schedules?: WorkflowScheduleDeclaration[];
 }

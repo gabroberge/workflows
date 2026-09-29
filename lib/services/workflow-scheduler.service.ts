@@ -55,6 +55,32 @@ const UNFINISHED: WorkflowStatus[] = ['pending', 'running', 'suspended', 'compen
 /** The stored input of a declared schedule that no codec can read any more: never equal to the code's. */
 const UNREADABLE = Symbol('unreadable');
 
+/** How often a process reconciles its code's declared schedules with the store, after doing so at its startup. */
+const RECONCILE_MS = 60_000;
+/** A process whose code declares a schedule confirms it when it reconciles, if its last confirmation is this old. */
+const CONFIRM_MS = 60_000;
+/** A declared schedule that no process confirmed for this long has no running code that declares it. */
+const STALE_MS = 5 * 60_000;
+
+/** A declared schedule's spec as stored: its declaration's, and the code that saved or last confirmed it, and when. */
+interface DeclaredSpec extends ScheduleSpec {
+  /** The version of its workflow whose code saved or last confirmed it: the highest the process registers. */
+  declaredBy?: number;
+  /** When a process whose code declares it saved or last confirmed it. */
+  confirmedAt?: number;
+}
+
+/** What the code declares: the stored spec without its bookkeeping. */
+function declaration({ declaredBy: _declaredBy, confirmedAt: _confirmedAt, ...spec }: DeclaredSpec): ScheduleSpec {
+  return spec;
+}
+
+/** Whether a process whose code declares the schedule confirmed it lately: the code of a running process declares it. */
+function confirmed(record: WorkflowScheduleRecord, now: number): boolean {
+  const { confirmedAt } = record.spec as DeclaredSpec;
+  return confirmedAt !== undefined && now - confirmedAt < STALE_MS;
+}
+
 /** The id of the instance an occurrence starts: the same wherever and however often it is started. */
 export function occurrenceId(schedule: string, at: number): string {
   return `${schedule}@${new Date(at).toISOString()}`;
@@ -69,6 +95,8 @@ export class WorkflowScheduler implements OnApplicationBootstrap {
   private readonly logger = new Logger('Workflows');
   private readonly clock: WorkflowClock;
   private syncing?: Promise<void>;
+  /** When `produce()` next reconciles the declared schedules with the code (the module's clock). */
+  private reconcileAt = 0;
   private readonly warned = new Set<string>();
 
   constructor(
@@ -95,26 +123,40 @@ export class WorkflowScheduler implements OnApplicationBootstrap {
     }
   }
 
-  /** The declared schedules, saved once per process (again after a failure). */
+  /** The declared schedules, reconciled with the code once per process at startup (again after a failure). */
   synced(): Promise<void> {
-    this.syncing ??= this.sync().catch((error: unknown) => {
-      this.syncing = undefined;
-      throw error;
-    });
+    this.syncing ??= this.reconcile(true).then(
+      () => {
+        this.reconcileAt = this.clock.now() + RECONCILE_MS;
+      },
+      (error: unknown) => {
+        this.syncing = undefined;
+        throw error;
+      },
+    );
     return this.syncing;
   }
 
   /**
-   * Saves the schedules the code declares (a changed one is updated, an unchanged one left as it is, its progress
-   * kept) and removes the ones the workflows this process runs no longer declare.
+   * Reconciles the declared schedules of the workflows this process registers with its code: at startup, then about
+   * once a minute (from the productions). Safe in a rolling deploy, where processes of other code run beside it:
+   *
+   * - A schedule its code declares is saved when it is missing, and confirmed (`confirmedAt`) when its last
+   *   confirmation is a minute old. One declared differently is replaced at startup, unless a newer version of the
+   *   workflow declared it and a process of that code still confirms it; later, only once no process confirms it
+   *   (the code that declared it is gone), or when an older version declared it.
+   * - A declared schedule its code doesn't declare is left while a process confirms it, since the code of a running
+   *   process declares it, and deleted once none has for five minutes.
    */
-  private async sync(): Promise<void> {
+  private async reconcile(startup: boolean): Promise<void> {
     if (this.registry.names().length === 0) {
       return;
     }
 
+    const now = this.clock.now();
     const declared = this.registry.schedules();
     for (const [id, schedule] of declared) {
+      const version = this.registry.latest(schedule.workflow)!.version;
       await this.modify(
         id,
         (current) => {
@@ -122,7 +164,7 @@ export class WorkflowScheduler implements OnApplicationBootstrap {
             this.warned.add(id);
             this.logger.warn(`Schedule "${id}" was saved with WorkflowSchedules.upsert(); workflow "${schedule.workflow}" declares it now, and takes it over.`);
           }
-          return this.declaredChange(current, schedule);
+          return this.declaredChange(current, schedule, { version, now, startup });
         },
         { read: (id) => this.readReplacing(id) },
       );
@@ -132,21 +174,44 @@ export class WorkflowScheduler implements OnApplicationBootstrap {
     const names = new Set(this.registry.names());
     for (const record of await this.allDeclared()) {
       if (names.has(record.workflow) && !declared.has(record.id)) {
-        await this.remove(record);
+        await this.remove(record, now);
       }
     }
   }
 
-  private declaredChange(current: WorkflowScheduleRecord | null, schedule: WorkflowDeclaredSchedule & { workflow: string }): ScheduleFields | null {
+  private declaredChange(
+    current: WorkflowScheduleRecord | null,
+    schedule: WorkflowDeclaredSchedule & { workflow: string },
+    at: { version: number; now: number; startup: boolean },
+  ): ScheduleFields | null {
     const input = schedule.spec.inputFn ? null : (schedule.input ?? null);
-    // With a codec, the input is saved again at each startup: encoded with the current key, a rotated one can go.
-    const same =
-      current?.declared &&
-      current.workflow === schedule.workflow &&
-      canonical(current.spec) === canonical(schedule.spec) &&
-      canonical(current.input ?? null) === canonical(input) &&
-      !(this.store.encodes && input !== null);
-    return same ? null : this.fields(current, { workflow: schedule.workflow, declared: true, spec: schedule.spec, input });
+    const spec: DeclaredSpec = { ...schedule.spec, declaredBy: at.version, confirmedAt: at.now };
+    if (!current?.declared) {
+      return this.fields(current, { workflow: schedule.workflow, declared: true, spec, input });
+    }
+
+    const stored = current.spec as DeclaredSpec;
+    const sameWorkflow = current.workflow === schedule.workflow;
+    const sameInput = canonical(current.input ?? null) === canonical(input);
+    if (sameWorkflow && canonical(declaration(stored)) === canonical(schedule.spec) && (sameInput || current.input === UNREADABLE)) {
+      // With a codec, the input is saved again at each startup: encoded with the current key, a rotated one can go.
+      const rewrite = !sameInput || (at.startup && this.store.encodes && input !== null);
+      const confirm = stored.confirmedAt === undefined || at.now - stored.confirmedAt >= CONFIRM_MS;
+      if (!rewrite && !confirm) {
+        return null;
+      }
+
+      const { workflow, paused, wakeAt, state } = current;
+      const by = Math.max(stored.declaredBy ?? 0, at.version);
+      return { workflow, declared: true, spec: { ...stored, declaredBy: by, confirmedAt: at.now }, input, paused, wakeAt, state, releaseLease: false };
+    }
+
+    // Declared otherwise by other code. A newer version's declaration stays while a process of it confirms it; the
+    // code that starts takes the others over, and a running process one that no process confirms any more (the code
+    // that declared it is gone) or an older version's.
+    const by = stored.declaredBy ?? 0;
+    const takeOver = !confirmed(current, at.now) || (sameWorkflow ? (at.startup ? by <= at.version : by < at.version) : at.startup);
+    return takeOver ? this.fields(current, { workflow: schedule.workflow, declared: true, spec, input }) : null;
   }
 
   /**
@@ -176,12 +241,12 @@ export class WorkflowScheduler implements OnApplicationBootstrap {
   }
 
   /**
-   * Deletes a declared schedule the code no longer declares, again if a worker wrote it meanwhile (a worker of the
-   * code that still declares it, in a rolling deploy).
+   * Deletes a declared schedule this process's code doesn't declare, once no process whose code declares it has
+   * confirmed it for five minutes; again if it was written meanwhile, unless that write confirmed it.
    */
-  private async remove(record: WorkflowScheduleRecord): Promise<void> {
+  private async remove(record: WorkflowScheduleRecord, now: number): Promise<void> {
     let current: WorkflowScheduleRecord | null = record;
-    for (let attempt = 0; attempt < 10 && current?.declared; attempt++) {
+    for (let attempt = 0; attempt < 10 && current?.declared && !confirmed(current, now); attempt++) {
       if (await this.store.inner.deleteSchedule(current.id, current.revision)) {
         return;
       }
@@ -269,6 +334,15 @@ export class WorkflowScheduler implements OnApplicationBootstrap {
     await this.synced();
 
     const now = this.clock.now();
+    if (now >= this.reconcileAt) {
+      this.reconcileAt = now + RECONCILE_MS;
+      try {
+        await this.reconcile(false);
+      } catch (error) {
+        this.logger.error('Reconciling the schedules the workflows declare failed; it is tried again in a minute.', error as Error);
+      }
+    }
+
     const token = randomUUID();
     const claimed = await this.store.claimSchedules({ owner, token, now, leaseUntil: now + leaseMs, limit: BATCH, workflows });
     const production: ScheduleProduction = { started: 0, cancelled: [] };
@@ -290,7 +364,7 @@ export class WorkflowScheduler implements OnApplicationBootstrap {
     const declared = record.declared ? this.registry.schedules().get(record.id) : undefined;
     if (record.declared && !declared) {
       // A declared schedule belongs to the code that declares it: in a rolling deploy, a worker of code that doesn't
-      // (yet, or any more) leaves it to one that does, and the last to start removes it.
+      // (yet, or any more) leaves it to one that does, and it goes once no process confirms it (see reconcile()).
       await this.store.writeSchedule(record.id, token, { now, state, wakeAt: record.wakeAt, release: true });
       if (!this.warned.has(`undeclared:${record.id}`)) {
         this.warned.add(`undeclared:${record.id}`);

@@ -176,7 +176,7 @@ describe('a declared schedule', () => {
     expect(await b.client.schedules.get('weekly-digest')).toMatchObject({ runs: 1, nextAt: monday + 7 * 86_400_000 });
   });
 
-  it('keeps its progress across restarts, follows the code when it changes, stays paused, and goes when the code drops it', async () => {
+  it('keeps its progress across restarts, follows the code when it changes, stays paused, and goes once the code that declared it is gone', async () => {
     let node = await start([Newsletter]);
     expect(await node.client.schedules.get('newsletter')).toMatchObject({ declared: true, nextAt: hours(9), input: { edition: 'daily' } });
     clock.set(hours(9));
@@ -197,7 +197,10 @@ describe('a declared schedule', () => {
     node = await restart([NewsletterRetimed]);
     expect(await node.client.schedules.get('newsletter')).toMatchObject({ cron: '0 17 * * *', nextAt: hours(17), runs: 1, input: { edition: 'evening' } });
 
-    node = await restart([NewsletterDropped]);
+    // Five minutes after the last process whose code declares it stopped, the code that dropped it removes it.
+    await nodes.pop()!.close();
+    clock.advance('5m');
+    node = await start([NewsletterDropped]);
     expect(await node.client.schedules.get('newsletter')).toBeNull();
     expect(await node.client.list({ scheduleId: 'newsletter' })).toMatchObject([{ id: `newsletter@${iso(hours(9))}`, status: 'completed' }]);
   });
@@ -237,6 +240,9 @@ describe('a declared schedule, in edge cases', () => {
     const other = await start([StockReportUndeclared]);
     const declaring = await start([StockReport]);
 
+    // A live worker confirms its declarations as it polls: a minute ago, say.
+    clock.set(hours(2) - 60_000);
+    await declaring.worker.drain();
     clock.set(hours(2));
     expect(await other.worker.drain()).toBe(0);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('Schedule "stock-report" is declared by code this worker doesn\'t run'));
@@ -244,20 +250,30 @@ describe('a declared schedule, in edge cases', () => {
     expect(world.calls.map((call) => call.key)).toEqual(['2']);
   });
 
-  it('is removed by a worker whose code dropped it, also when a worker that still declares it writes it meanwhile', async () => {
+  it('is removed by a worker whose code dropped it once no worker whose code declares it confirmed it for five minutes', async () => {
     const old = await start([StockReport]);
     clock.set(hours(2));
+    await old.worker.drain();
+    nodes.splice(nodes.indexOf(old), 1);
+    await old.close();
+
+    // Confirmed four minutes ago: the code of a running process may still declare it.
+    clock.set(hours(2) + 240_000);
+    const dropped = await start([StockReportUndeclared]);
+    expect(await dropped.client.schedules.get('stock-report')).toMatchObject({ declared: true });
+
     // Every node's store is one of these (each SQL node opens its own).
     const prototype = (storeKind === 'memory' ? InMemoryWorkflowStore : DrizzleWorkflowStore).prototype as WorkflowStore;
     const deleteSchedule = prototype.deleteSchedule;
     const spy = vi.spyOn(prototype, 'deleteSchedule').mockImplementationOnce(async function (this: WorkflowStore, id, revision) {
-      await old.worker.drain(); // produces the 2:00 occurrence: the schedule's revision moves on
+      await dropped.client.schedules.pause('stock-report'); // the revision moves on, and nobody confirmed it
       return deleteSchedule.call(this, id, revision);
     });
+    clock.set(hours(2) + 300_000);
+    await dropped.worker.drain();
 
-    await start([StockReportUndeclared]);
     expect(spy).toHaveBeenCalledTimes(2);
-    expect(await old.client.schedules.get('stock-report')).toBeNull();
+    expect(await dropped.client.schedules.get('stock-report')).toBeNull();
     expect(world.calls.map((call) => call.key)).toEqual(['2']);
   });
 
