@@ -138,15 +138,18 @@ export class WorkflowScheduler implements OnApplicationBootstrap {
   }
 
   /**
-   * Reconciles the declared schedules of the workflows this process registers with its code: at startup, then about
-   * once a minute (from the productions). Safe in a rolling deploy, where processes of other code run beside it:
+   * Reconciles the declared schedules with this process's code: at startup, then about once a minute (from the
+   * productions). Safe in a rolling deploy, where processes of other code run beside it:
    *
    * - A schedule its code declares is saved when it is missing, and confirmed (`confirmedAt`) when its last
    *   confirmation is a minute old. One declared differently is replaced at startup, unless a newer version of the
    *   workflow declared it and a process of that code still confirms it; later, only once no process confirms it
    *   (the code that declared it is gone), or when an older version declared it.
    * - A declared schedule its code doesn't declare is left while a process confirms it, since the code of a running
-   *   process declares it, and deleted once none has for five minutes.
+   *   process declares it, and deleted once none has for five minutes, whether or not this process registers its
+   *   workflow: otherwise the schedules of a workflow that no code has any more would stay forever. The processes
+   *   whose code declares one save it again as they start, so after its pods were scaled to zero for longer, it
+   *   starts over: from its next occurrence, unpaused, its runs counted from zero.
    */
   private async reconcile(startup: boolean): Promise<void> {
     if (this.registry.names().length === 0) {
@@ -171,9 +174,8 @@ export class WorkflowScheduler implements OnApplicationBootstrap {
     }
 
     // Read as stored: removing a schedule needs nothing a codec encoded.
-    const names = new Set(this.registry.names());
     for (const record of await this.allDeclared()) {
-      if (names.has(record.workflow) && !declared.has(record.id)) {
+      if (!declared.has(record.id)) {
         await this.remove(record, now);
       }
     }
@@ -248,6 +250,7 @@ export class WorkflowScheduler implements OnApplicationBootstrap {
     let current: WorkflowScheduleRecord | null = record;
     for (let attempt = 0; attempt < 10 && current?.declared && !confirmed(current, now); attempt++) {
       if (await this.store.inner.deleteSchedule(current.id, current.revision)) {
+        this.logger.log(`Deleted schedule "${current.id}" of workflow "${current.workflow}": no process whose code declares it confirmed it for five minutes.`);
         return;
       }
       current = await this.store.inner.getSchedule(current.id);

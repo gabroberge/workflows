@@ -582,6 +582,8 @@ describe('purge()', () => {
     expect(await app.client.getStatus('audit-1')).toMatchObject({ status: 'suspended', wakeAt: T0 + 3 * 3_600_000 });
 
     clock.set(T0 + 40 * 86_400_000 + 2 * 3_600_000);
+    // The app's worker polls all along: it confirms the schedule its code declares, which other code leaves then.
+    await app.worker.drain();
     const api = await start([]);
     expect(await api.client.purge({ olderThan: '30d' })).toEqual({ instances: 3, signals: 1, rateLimits: 1 });
     expect((await api.client.list()).map((instance) => [instance.id, instance.status])).toEqual([['audit-1', 'suspended']]);

@@ -2,8 +2,8 @@
  * Declared schedules in a rolling deploy: processes of the old and of the new code side by side on one database,
  * started in either order. A process leaves a schedule the code of a running process declares, whatever its own
  * code says, and a newer version's declaration as it is; a declaration no running code confirms any more goes, or
- * is taken over, within minutes. Every running process drains at least once a minute of the clock, as a live
- * worker polls.
+ * is taken over, within minutes, whether or not the process runs its workflow. Every running process drains at least
+ * once a minute of the clock, as a live worker polls.
  */
 import { type Type } from '@nestjs/common';
 import { ManualWorkflowClock, Workflow, type WorkflowContext, type WorkflowScheduleSkippedEvent } from '../lib/index.js';
@@ -53,6 +53,12 @@ class StockReportV2 {
   run(ctx: WorkflowContext) {
     return report(this.world, ctx);
   }
+}
+
+/** A workflow of code without the stock report at all: the new code, or another service on the database. */
+@Workflow('stock-alert')
+class StockAlert {
+  async run() {}
 }
 
 let db: TestDb;
@@ -165,5 +171,47 @@ describe('a declared schedule in a rolling deploy', () => {
 
     expect(reports()).toEqual([iso(minutes(60))]);
     expect(fresh.events.filter((event): event is WorkflowScheduleSkippedEvent => event.type === 'schedule-skipped')).toEqual([]);
+  });
+
+  it('removes the declaration of a workflow the new code no longer has once no pod of the old code has run for five minutes', async () => {
+    const old = await start([StockReportV1Hourly]);
+    const fresh = await start([StockAlert]);
+
+    // The old code still runs: it declares the schedule, and starts its occurrences.
+    await runUntil(minutes(60));
+    expect(reports()).toEqual([iso(minutes(60))]);
+    await stop(old);
+
+    await runUntil(minutes(64));
+    expect(await fresh.client.schedules.get('stock-report')).toMatchObject({ declared: true });
+    await runUntil(minutes(66));
+    expect(await fresh.client.schedules.get('stock-report')).toBeNull();
+    await runUntil(minutes(120));
+
+    expect(reports()).toEqual([iso(minutes(60))]);
+    expect(await fresh.client.list({ scheduleId: 'stock-report' })).toMatchObject([{ id: `stock-report@${iso(minutes(60))}`, status: 'completed' }]);
+  });
+
+  it('keeps a schedule while the pods that declare it are gone for less than five minutes, and saves it again as the next one starts', async () => {
+    let pool = await start([StockReportV1Hourly]);
+    await start([StockAlert]);
+    await runUntil(minutes(60));
+
+    // Scaled to zero for four minutes: the schedule keeps its progress.
+    await stop(pool);
+    await runUntil(minutes(64));
+    pool = await start([StockReportV1Hourly]);
+    expect(await schedule()).toMatchObject({ runs: 1, nextAt: minutes(120) });
+    await runUntil(minutes(120));
+
+    // For five: another pod removes it, and the pool's next pod saves it again, from its next occurrence.
+    await stop(pool);
+    await runUntil(minutes(126));
+    expect(await schedule()).toBeNull();
+    await start([StockReportV1Hourly]);
+    expect(await schedule()).toMatchObject({ declared: true, runs: 0, nextAt: minutes(180) });
+    await runUntil(minutes(180));
+
+    expect(reports()).toEqual([iso(minutes(60)), iso(minutes(120)), iso(minutes(180))]);
   });
 });
