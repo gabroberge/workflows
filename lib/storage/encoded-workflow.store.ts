@@ -220,7 +220,10 @@ export class EncodedWorkflowStore implements WorkflowStore {
   }
 
   async claimSchedules(request: WorkflowScheduleClaimRequest): Promise<WorkflowScheduleRecord[]> {
-    return this.readable(await this.inner.claimSchedules(request), (record) => this.decodeSchedule(record), 'Schedule');
+    return this.readable(await this.inner.claimSchedules(request), (record) => this.decodeSchedule(record), 'Schedule', async (record) => {
+      // Handed back untouched, due when its lease would have ended.
+      await this.inner.writeSchedule(record.id, request.token, { now: request.now, state: record.state, wakeAt: request.leaseUntil, release: true });
+    });
   }
 
   writeSchedule(id: string, token: string, write: WorkflowScheduleWrite): Promise<boolean> {
@@ -229,7 +232,17 @@ export class EncodedWorkflowStore implements WorkflowStore {
 
   async claim(request: WorkflowClaimRequest): Promise<WorkflowClaim> {
     const claim = await this.inner.claim(request);
-    return { ...claim, instances: await this.readable(claim.instances, (instance) => this.decodeInstance(instance), 'Instance') };
+    const instances = await this.readable(claim.instances, (instance) => this.decodeInstance(instance), 'Instance', async (instance) => {
+      // Handed back at once, with its waits, due when its lease would have ended: its concurrency slot is free now,
+      // and the instances due before then go first, instead of this one taking the slot at every claim.
+      const waits = (await this.inner.get(instance.id))?.waits ?? [];
+      await this.inner.write(instance.id, request.token, {
+        now: request.now,
+        entries: [],
+        release: { wakeAt: request.leaseUntil, waits, signalCursor: claim.lastSignalId },
+      });
+    });
+    return { ...claim, instances };
   }
 
   renew(id: string, token: string, leaseUntil: number) {
@@ -328,16 +341,18 @@ export class EncodedWorkflowStore implements WorkflowStore {
   }
 
   /**
-   * What a claim leased, decoded; one that can't be (a codec that is gone) is left out, logged, and stays leased
-   * until its lease expires: claimed again then, and read once the codec is back, while the others run.
+   * What a claim leased, decoded. One that can't be (a codec that is gone) is left out, logged, and handed back to
+   * be claimed again later, and read once the codec is back, while the others run.
    */
-  private async readable<T extends { id: string }>(claimed: T[], decode: (item: T) => Promise<T>, kind: string): Promise<T[]> {
+  private async readable<T extends { id: string }>(claimed: T[], decode: (item: T) => Promise<T>, kind: string, handBack: (item: T) => Promise<unknown>): Promise<T[]> {
     const decoded: T[] = [];
     for (const item of claimed) {
       try {
         decoded.push(await decode(item));
       } catch (error) {
-        EncodedWorkflowStore.logger.error(`${kind} "${item.id}" can't be read, so it isn't run; it is claimed again when its lease expires. ${(error as Error).message}`);
+        EncodedWorkflowStore.logger.error(`${kind} "${item.id}" can't be read, so it isn't run; it is claimed again later. ${(error as Error).message}`);
+        // At worst its lease expires, as if its worker had died.
+        await handBack(item).catch(() => undefined);
       }
     }
     return decoded;

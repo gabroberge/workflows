@@ -130,6 +130,16 @@ class ParentOfFailing {
 
 const message = new WorkflowSignal<string>('chat.message');
 
+@Workflow('one-at-a-time', { concurrency: { limit: 1 } })
+class OneAtATime {
+  constructor(private readonly world: World) {}
+
+  async run(ctx: WorkflowContext) {
+    const id = ctx.workflowId;
+    await ctx.step('work', () => this.world.record('work', id));
+  }
+}
+
 /** Echoes a signal, or fails with it: strings that look like envelopes, from its caller and from whoever signals it. */
 @Workflow('echo')
 class EchoWorkflow {
@@ -334,9 +344,26 @@ describe('a codec', () => {
     const error = vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
     await node.client.start(RefundWorkflow, { orderId: 'o-2', card: 'plain' }, { id: 'readable' });
     await node.worker.drain();
-    expect(await node.store.get('unreadable')).toMatchObject({ status: 'running', runs: 1 });
+    expect(await node.store.get('unreadable')).toMatchObject({ status: 'running', runs: 1, leaseUntil: null, wakeAt: clock.now() + 30_000 });
     expect(await node.store.get('readable')).toMatchObject({ status: 'suspended' });
-    expect(error).toHaveBeenCalledWith(expect.stringContaining('Instance "unreadable" can\'t be read, so it isn\'t run; it is claimed again when its lease expires.'));
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('Instance "unreadable" can\'t be read, so it isn\'t run; it is claimed again later.'));
+  });
+
+  it("doesn't let an instance it can't read hold a concurrency slot, or go first at every claim", async () => {
+    let node = await start(aes(), [OneAtATime]);
+    await node.client.start(OneAtATime, { card: SECRET }, { id: 'unreadable' });
+    await nodes.pop()!.close();
+
+    vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    node = await start(undefined, [OneAtATime]);
+    clock.advance('1s');
+    await node.client.start(OneAtATime, { card: 'plain' }, { id: 'readable' });
+    for (let i = 0; i < 3; i++) {
+      await node.worker.drain();
+      clock.advance('31s');
+    }
+    expect(await node.client.getStatus('readable')).toMatchObject({ status: 'completed' });
+    expect(world.calls.map((call) => call.key)).toEqual(['readable']);
   });
 
   it('is created with its dependencies when given as a class, and validated at startup', async () => {
