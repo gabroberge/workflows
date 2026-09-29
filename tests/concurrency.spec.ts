@@ -7,11 +7,16 @@ import { Injectable } from '@nestjs/common';
 import { ManualWorkflowClock, Workflow, type WorkflowContext } from '../lib/index.js';
 import { boot, tempDb, type Node, type TestDb } from './support.js';
 
-/** Counts the steps running at once, overall and per key. */
+/**
+ * Counts the steps running at once, overall and per key. A step of a key in `meet` waits (up to a
+ * second) until that many are running, so a limit that lets them run together shows it however
+ * slow the machine.
+ */
 @Injectable()
 class Meter {
   running = new Map<string, number>();
   peak = new Map<string, number>();
+  meet = new Map<string, number>();
   order: string[] = [];
 
   async enter(keys: string[], id: string) {
@@ -20,6 +25,11 @@ class Meter {
       const n = (this.running.get(key) ?? 0) + 1;
       this.running.set(key, n);
       this.peak.set(key, Math.max(this.peak.get(key) ?? 0, n));
+    }
+
+    const deadline = Date.now() + 1_000;
+    while (keys.some((key) => (this.running.get(key) ?? 0) < (this.meet.get(key) ?? 0)) && Date.now() < deadline) {
+      await sleep(5);
     }
     await sleep(15);
     for (const key of keys) {
@@ -84,6 +94,7 @@ async function start() {
 
 it("runs one instance per key at a time, in order, and lets a parked one's slot go", async () => {
   const node = await start();
+  meter.meet.set('customer:null', 2);
   for (const [id, customerId] of [['o-1', 'c-1'], ['o-2', 'c-1'], ['o-3', 'c-2'], ['o-4', null], ['o-5', null]] as const) {
     await node.client.start(Fulfilment, { id, customerId }, { id });
   }
@@ -105,6 +116,7 @@ it("runs one instance per key at a time, in order, and lets a parked one's slot 
 
 it('holds a workflow to its limit and each key to its own, across two workers', async () => {
   const [a, b] = [await start(), await start()];
+  meter.meet.set('reports', 2);
   for (let n = 0; n < 8; n++) {
     await a.client.start(Report, { tenant: n % 3 === 0 ? 'acme' : `t${n}`, n }, { id: `r-${n}` });
   }
