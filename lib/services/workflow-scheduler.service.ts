@@ -6,8 +6,9 @@ import type { WorkflowDeclaredSchedule, WorkflowMetadata } from '../interfaces/w
 import type { WorkflowClock } from '../interfaces/workflow-clock.interface.js';
 import type { WorkflowInstance, WorkflowStatus } from '../interfaces/workflow-instance.interface.js';
 import type { WorkflowSchedule } from '../interfaces/workflow-schedule.interface.js';
-import type { WorkflowScheduleRecord, WorkflowScheduleSave, WorkflowStore } from '../interfaces/workflow-store.interface.js';
+import type { WorkflowScheduleRecord, WorkflowScheduleSave } from '../interfaces/workflow-store.interface.js';
 import type { WorkflowsModuleOptions } from '../interfaces/workflows-module-options.interface.js';
+import type { EncodedWorkflowStore } from '../storage/encoded-workflow.store.js';
 import { ENGINE_STORE, WorkflowStorage } from '../storage/workflow.storage.js';
 import { canonical } from '../utils/canonical.util.js';
 import { systemClock } from '../utils/clock.util.js';
@@ -49,6 +50,9 @@ export const MAX_CATCH_UP = 100;
 const BATCH = 100;
 const UNFINISHED: WorkflowStatus[] = ['pending', 'running', 'suspended', 'compensating'];
 
+/** The stored input of a declared schedule that no codec can read any more: never equal to the code's. */
+const UNREADABLE = Symbol('unreadable');
+
 /** The id of the instance an occurrence starts: the same wherever and however often it is started. */
 export function occurrenceId(schedule: string, at: number): string {
   return `${schedule}@${new Date(at).toISOString()}`;
@@ -75,7 +79,7 @@ export class WorkflowScheduler implements OnApplicationBootstrap {
   }
 
   /** Read at each call, never in the constructor: sources register while providers are created. */
-  private get store(): WorkflowStore {
+  private get store(): EncodedWorkflowStore {
     return this.storage[ENGINE_STORE];
   }
 
@@ -109,31 +113,62 @@ export class WorkflowScheduler implements OnApplicationBootstrap {
 
     const declared = this.registry.schedules();
     for (const [id, schedule] of declared) {
-      await this.modify(id, (current) => {
-        if (current && !current.declared && !this.warned.has(id)) {
-          this.warned.add(id);
-          this.logger.warn(`Schedule "${id}" was saved with WorkflowSchedules.upsert(); workflow "${schedule.workflow}" declares it now, and takes it over.`);
-        }
-        return this.declaredChange(current, schedule);
-      });
+      await this.modify(
+        id,
+        (current) => {
+          if (current && !current.declared && !this.warned.has(id)) {
+            this.warned.add(id);
+            this.logger.warn(`Schedule "${id}" was saved with WorkflowSchedules.upsert(); workflow "${schedule.workflow}" declares it now, and takes it over.`);
+          }
+          return this.declaredChange(current, schedule);
+        },
+        (id) => this.readDeclared(id),
+      );
     }
 
+    // Read as stored: removing a schedule needs nothing a codec encoded.
     const names = new Set(this.registry.names());
     for (const record of await this.allDeclared()) {
       if (names.has(record.workflow) && !declared.has(record.id)) {
-        await this.store.deleteSchedule(record.id, record.revision);
+        await this.remove(record);
       }
     }
   }
 
   private declaredChange(current: WorkflowScheduleRecord | null, schedule: WorkflowDeclaredSchedule & { workflow: string }): ScheduleFields | null {
     const input = schedule.spec.inputFn ? null : (schedule.input ?? null);
+    // With a codec, the input is saved again at each startup: encoded with the current key, a rotated one can go.
     const same =
       current?.declared &&
       current.workflow === schedule.workflow &&
       canonical(current.spec) === canonical(schedule.spec) &&
-      canonical(current.input ?? null) === canonical(input);
+      canonical(current.input ?? null) === canonical(input) &&
+      !(this.store.encodes && input !== null);
     return same ? null : this.fields(current, { workflow: schedule.workflow, declared: true, spec: schedule.spec, input });
+  }
+
+  /** A declared schedule, with an input no codec can read any more (a dropped key) as unreadable: the code's replaces it. */
+  private async readDeclared(id: string): Promise<WorkflowScheduleRecord | null> {
+    try {
+      return await this.store.getSchedule(id);
+    } catch {
+      const record = await this.store.inner.getSchedule(id);
+      return record && { ...record, input: UNREADABLE };
+    }
+  }
+
+  /**
+   * Deletes a declared schedule the code no longer declares, again if a worker wrote it meanwhile (a worker of the
+   * code that still declares it, in a rolling deploy).
+   */
+  private async remove(record: WorkflowScheduleRecord): Promise<void> {
+    let current: WorkflowScheduleRecord | null = record;
+    for (let attempt = 0; attempt < 10 && current?.declared; attempt++) {
+      if (await this.store.inner.deleteSchedule(current.id, current.revision)) {
+        return;
+      }
+      current = await this.store.inner.getSchedule(current.id);
+    }
   }
 
   /**
@@ -166,9 +201,13 @@ export class WorkflowScheduler implements OnApplicationBootstrap {
    * Applies `change` to the stored schedule until it lands: a write conditional on the revision it read. `change`
    * returns the new fields, or `null` to leave it. Returns the schedule as stored (`null`: none).
    */
-  async modify(id: string, change: (current: WorkflowScheduleRecord | null) => ScheduleFields | null): Promise<WorkflowScheduleRecord | null> {
+  async modify(
+    id: string,
+    change: (current: WorkflowScheduleRecord | null) => ScheduleFields | null,
+    read: (id: string) => Promise<WorkflowScheduleRecord | null> = (id) => this.store.getSchedule(id),
+  ): Promise<WorkflowScheduleRecord | null> {
     for (let attempt = 0; attempt < 10; attempt++) {
-      const current = await this.store.getSchedule(id);
+      const current = await read(id);
       const fields = change(current);
       if (!fields) {
         return current;
@@ -182,11 +221,11 @@ export class WorkflowScheduler implements OnApplicationBootstrap {
     throw new WorkflowStateError(`Schedule "${id}" kept changing while it was being saved. Try again.`);
   }
 
-  /** Every declared schedule, a page at a time. */
+  /** Every declared schedule as stored, a page at a time. */
   private async allDeclared(): Promise<WorkflowScheduleRecord[]> {
     const records: WorkflowScheduleRecord[] = [];
     for (let offset = 0; ; offset += BATCH) {
-      const page = await this.store.listSchedules({ declared: true, limit: BATCH, offset });
+      const page = await this.store.inner.listSchedules({ declared: true, limit: BATCH, offset });
       records.push(...page);
       if (page.length < BATCH) {
         return records;
@@ -228,12 +267,13 @@ export class WorkflowScheduler implements OnApplicationBootstrap {
     const spec = record.spec as ScheduleSpec;
     const state = record.state as ScheduleState;
     const declared = record.declared ? this.registry.schedules().get(record.id) : undefined;
-    if (spec.inputFn && !declared) {
-      // A worker whose code doesn't declare it (a rolling deploy) can't compute its input: another can.
+    if (record.declared && !declared) {
+      // A declared schedule belongs to the code that declares it: in a rolling deploy, a worker of code that doesn't
+      // (yet, or any more) leaves it to one that does, and the last to start removes it.
       await this.store.writeSchedule(record.id, token, { now, state, wakeAt: record.wakeAt, release: true });
-      if (!this.warned.has(`input:${record.id}`)) {
-        this.warned.add(`input:${record.id}`);
-        this.logger.warn(`Schedule "${record.id}" computes its input with a function this worker's code doesn't declare; it leaves it to a worker whose code does.`);
+      if (!this.warned.has(`undeclared:${record.id}`)) {
+        this.warned.add(`undeclared:${record.id}`);
+        this.logger.warn(`Schedule "${record.id}" is declared by code this worker doesn't run; it leaves it to a worker whose code declares it.`);
       }
       return { started: 0, cancelled: [] };
     }
@@ -337,7 +377,9 @@ export class WorkflowScheduler implements OnApplicationBootstrap {
     const id = occurrenceId(record.id, at);
     let data;
     try {
-      const input = spec.inputFn ? (declared!.input as (occurrence: { id: string; at: number }) => unknown)({ id: record.id, at }) : record.input;
+      // A declared schedule's input is its code's (the stored one is for reading), an upserted one's is stored.
+      const source = declared ? declared.input : record.input;
+      const input = typeof source === 'function' ? (source as (occurrence: { id: string; at: number }) => unknown)({ id: record.id, at }) : source;
       data = newInstance(workflow, id, input ?? undefined, {
         caller: `Schedule "${record.id}"`,
         now,

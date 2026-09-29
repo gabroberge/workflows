@@ -62,7 +62,7 @@ export class WorkflowStorage {
   private readonly logger = new Logger('WorkflowsModule');
   private registered?: WorkflowStore;
   private active?: WorkflowStore;
-  private engine?: WorkflowStore;
+  private engine?: EncodedWorkflowStore;
   private readonly codecs: PayloadCodecs;
 
   constructor(
@@ -109,7 +109,7 @@ export class WorkflowStorage {
   }
 
   /** @internal `source`, as the engine uses it: payloads encoded with the module's codecs on the way in, and decoded on the way out. */
-  get [ENGINE_STORE](): WorkflowStore {
+  get [ENGINE_STORE](): EncodedWorkflowStore {
     return (this.engine ??= new EncodedWorkflowStore(this.source, this.codecs));
   }
 

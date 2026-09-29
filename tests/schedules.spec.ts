@@ -9,11 +9,14 @@ import {
   Workflow,
   WorkflowNotFoundError,
   WorkflowSignal,
+  InMemoryWorkflowStore,
   WorkflowStateError,
   type WorkflowContext,
   type WorkflowScheduleSkippedEvent,
+  type WorkflowStore,
 } from '../lib/index.js';
-import { boot, tempDb, World, type Node, type TestDb } from './support.js';
+import { DrizzleWorkflowStore } from './fixtures/database/drizzle-workflow.store.js';
+import { boot, storeKind, tempDb, World, type Node, type TestDb } from './support.js';
 
 const T0 = Date.UTC(2026, 0, 1); // a Thursday, midnight UTC
 const hours = (n: number) => T0 + n * 3_600_000;
@@ -229,15 +232,32 @@ describe('a declared schedule, in edge cases', () => {
     expect(await node.client.schedules.get('stock-report')).toMatchObject({ runs: 1, nextAt: hours(3) });
   });
 
-  it('is left to a worker whose code declares it, when its input is a function', async () => {
+  it('is left to a worker whose code declares it', async () => {
     const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     const other = await start([StockReportUndeclared]);
     const declaring = await start([StockReport]);
 
     clock.set(hours(2));
     expect(await other.worker.drain()).toBe(0);
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Schedule "stock-report" computes its input with a function this worker\'s code doesn\'t declare'));
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Schedule "stock-report" is declared by code this worker doesn\'t run'));
     await declaring.worker.drain();
+    expect(world.calls.map((call) => call.key)).toEqual(['2']);
+  });
+
+  it('is removed by a worker whose code dropped it, also when a worker that still declares it writes it meanwhile', async () => {
+    const old = await start([StockReport]);
+    clock.set(hours(2));
+    // Every node's store is one of these (each SQL node opens its own).
+    const prototype = (storeKind === 'memory' ? InMemoryWorkflowStore : DrizzleWorkflowStore).prototype as WorkflowStore;
+    const deleteSchedule = prototype.deleteSchedule;
+    const spy = vi.spyOn(prototype, 'deleteSchedule').mockImplementationOnce(async function (this: WorkflowStore, id, revision) {
+      await old.worker.drain(); // produces the 2:00 occurrence: the schedule's revision moves on
+      return deleteSchedule.call(this, id, revision);
+    });
+
+    await start([StockReportUndeclared]);
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(await old.client.schedules.get('stock-report')).toBeNull();
     expect(world.calls.map((call) => call.key)).toEqual(['2']);
   });
 

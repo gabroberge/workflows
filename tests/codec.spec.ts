@@ -130,6 +130,15 @@ class ParentOfFailing {
 
 const message = new WorkflowSignal<string>('chat.message');
 
+@Workflow('stock-count', { schedules: [{ id: 'stock-count', every: '1h', input: { warehouse: 'main' } }] })
+class StockCount {
+  constructor(private readonly world: World) {}
+
+  async run(ctx: WorkflowContext, input: { warehouse: string }) {
+    this.world.record('count', `${ctx.schedule?.id} ${input.warehouse}`);
+  }
+}
+
 @Workflow('one-at-a-time', { concurrency: { limit: 1 } })
 class OneAtATime {
   constructor(private readonly world: World) {}
@@ -333,6 +342,27 @@ describe('a codec', () => {
       }
       await nodes.pop()!.close();
     }
+  });
+
+  it("saves a declared schedule's input again at startup: under the current key, or from the code once unreadable", async () => {
+    const input = async (node: Node) => (await node.store.getSchedule('stock-count'))!.input as string;
+    let node = await start(aes({ k1: KEY_1 }, 'k1'), [StockCount]);
+    expect(await input(node)).toMatch(/^\$wf1:aes-256-gcm:k1\./);
+    await node.client.schedules.upsert('stored-under-k1', { workflow: StockCount, every: '1h', input: { warehouse: SECRET } });
+    await nodes.pop()!.close();
+
+    node = await start(aes({ k1: KEY_1, k2: KEY_2 }, 'k2'), [StockCount]);
+    expect(await input(node)).toMatch(/^\$wf1:aes-256-gcm:k2\./);
+    await nodes.pop()!.close();
+
+    // k1 dropped, with an upserted schedule's input still under it: it can't run; the declared one can.
+    const error = vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    node = await start(aes({ k3: randomBytes(32) }, 'k3'), [StockCount]);
+    expect(await input(node)).toMatch(/^\$wf1:aes-256-gcm:k3\./);
+    clock.advance('1h');
+    await node.worker.drain();
+    expect(world.calls.map((call) => call.key)).toEqual(['stock-count main']);
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('Schedule "stored-under-k1" can\'t be read, so it isn\'t run'));
   });
 
   it("leaves an instance it can't read to its lease, and runs the others", async () => {

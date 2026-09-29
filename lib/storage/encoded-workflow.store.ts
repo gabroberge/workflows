@@ -73,6 +73,11 @@ export class PayloadCodecs {
     this.byId = new Map([...codecs, PLAIN].map((codec) => [codec.id, codec]));
   }
 
+  /** Whether a codec encodes what is written (else payloads are stored as they are). */
+  get encodes(): boolean {
+    return this.writer !== undefined;
+  }
+
   encode(value: unknown, context: WorkflowPayloadContext): Maybe<unknown> {
     const writer = this.writer ?? (encoded(value) ? PLAIN : undefined);
     if (value === undefined || value === null || !writer) {
@@ -136,7 +141,8 @@ export class EncodedWorkflowStore implements WorkflowStore {
   readonly signalInTransaction?: WorkflowStore['signalInTransaction'];
 
   constructor(
-    private readonly inner: WorkflowStore,
+    /** The store itself: what it holds, undecoded. */
+    readonly inner: WorkflowStore,
     private readonly codecs: PayloadCodecs,
   ) {
     // Only when the store has them: the client tells a store that can't join transactions by their absence.
@@ -148,6 +154,11 @@ export class EncodedWorkflowStore implements WorkflowStore {
     if (typeof inner.signalInTransaction === 'function') {
       this.signalInTransaction = (transaction, signal) => toPromise(then(this.encodeSignal(signal), (encoded) => inner.signalInTransaction!(transaction, encoded)));
     }
+  }
+
+  /** Whether a codec encodes what is written. */
+  get encodes(): boolean {
+    return this.codecs.encodes;
   }
 
   create(instance: NewWorkflowInstance) {
