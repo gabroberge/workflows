@@ -12,7 +12,7 @@ import {
   WorkflowSignal,
   type WorkflowContext,
 } from '../lib/index.js';
-import { boot, tempDb, type Node, type TestDb } from './support.js';
+import { boot, tempDb, waitFor, type Node, type TestDb } from './support.js';
 
 const approval = new WorkflowSignal<{ approved: boolean }>('refund.approval');
 
@@ -126,6 +126,28 @@ describe('result()', () => {
     const deleted = node.client.result('refund-o-5');
     await node.client.delete('refund-o-5', { force: true });
     await expect(deleted).rejects.toThrow('No workflow instance with id "refund-o-5".');
+  });
+
+  it('rejects at once when the application shuts down while it waits, without waiting for its store', async () => {
+    const node = await start();
+    await node.client.start(Refund, { orderId: 'o-8', amount: 100 }, { id: 'refund-o-8' });
+    // The database closes with the application: from now on a read never settles.
+    const get = node.store.get.bind(node.store);
+    let closing = false;
+    let reads = 0;
+    vi.spyOn(node.store, 'get').mockImplementation((...args) => {
+      reads++;
+      return closing ? new Promise<never>(() => undefined) : get(...args);
+    });
+
+    const waiting = node.client.result('refund-o-8').catch((error: unknown) => error);
+    await waitFor(() => reads === 1);
+    closing = true;
+    await waitFor(() => reads === 2);
+    nodes.splice(nodes.indexOf(node), 1);
+    await node.close();
+    vi.restoreAllMocks();
+    expect(await waiting).toEqual(new Error('The application shut down while waiting for the result of instance "refund-o-8".'));
   });
 
   it("sees an instance another process runs by reading the store, without that process's events", async () => {

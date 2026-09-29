@@ -135,9 +135,10 @@ export class WorkflowClient {
    * Waits for the instance to end and resolves with its output, or rejects with a
    * `WorkflowFailedError` (its `status` is `failed`, `cancelled` or `compensation_failed`, its
    * `cause` the instance's error). Rejects with `WorkflowResultTimeoutError` past `timeout` (the
-   * instance keeps running), and `WorkflowNotFoundError` for an unknown id or one deleted while
-   * waiting. An instance run by this process's worker is seen the moment it ends; one run
-   * elsewhere, at the next read of the store (every 25ms at first, backing off to every second).
+   * instance keeps running), `WorkflowNotFoundError` for an unknown id or one deleted while
+   * waiting, and an `Error` as soon as the application shuts down. An instance run by this
+   * process's worker is seen the moment it ends; one run elsewhere, at the next read of the store
+   * (every 25ms at first, backing off to every second).
    */
   async result<O = unknown>(id: string, options: WorkflowResultOptions = {}): Promise<Journaled<O>> {
     const timeoutMs = options.timeout === undefined ? Infinity : toMs(options.timeout);
@@ -146,6 +147,8 @@ export class WorkflowClient {
 
     let ended = false;
     let closed = false;
+    let close!: () => void;
+    const closing = new Promise<typeof SHUT_DOWN>((resolve) => (close = () => resolve(SHUT_DOWN)));
     let wake: (() => void) | undefined;
     const nudge = () => {
       ended = true;
@@ -159,6 +162,7 @@ export class WorkflowClient {
       },
       complete: () => {
         closed = true;
+        close();
         nudge();
       },
     });
@@ -167,7 +171,12 @@ export class WorkflowClient {
     try {
       for (let delay = 25; ; delay = Math.min(delay * 2, 1_000)) {
         ended = false;
-        const instance = await this.store.get(id);
+        // The application's database closes with it: a read then may fail or never settle, so none waits past the
+        // shutdown, and none starts after it.
+        const instance = closed ? SHUT_DOWN : await Promise.race([this.store.get(id), closing]);
+        if (instance === SHUT_DOWN) {
+          throw new Error(`The application shut down while waiting for the result of instance "${id}".`);
+        }
         if (!instance) {
           throw new WorkflowNotFoundError(`No workflow instance with id "${id}".`);
         }
@@ -179,9 +188,6 @@ export class WorkflowClient {
         }
 
         options.signal?.throwIfAborted();
-        if (closed) {
-          throw new Error(`The application shut down while waiting for the result of instance "${id}".`);
-        }
         const remaining = deadline - performance.now();
         if (remaining <= 0) {
           throw new WorkflowResultTimeoutError(id, timeoutMs);
@@ -497,6 +503,8 @@ export class WorkflowClient {
 }
 
 const FINISHED: WorkflowStatus[] = ['completed', 'failed', 'cancelled', 'compensation_failed'];
+/** What a read of `result()` gives way to once the application shut down. */
+const SHUT_DOWN = Symbol('shut down');
 const ENDED_EVENTS = new Set<WorkflowEvent['type']>(['workflow-completed', 'workflow-failed', 'workflow-cancelled', 'workflow-compensation-failed', 'workflow-deleted']);
 
 /** What `result()` rejects with for an instance that ended without completing. */
