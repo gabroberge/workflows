@@ -104,8 +104,26 @@ export class AesGcmPayloadCodec implements WorkflowPayloadCodec {
   }
 }
 
-function keyBytes(id: string, key: string | Uint8Array): Buffer {
-  const bytes = typeof key === 'string' ? Buffer.from(key, 'base64') : Buffer.from(key);
+function keyBytes(id: string, key: unknown): Buffer {
+  const advice = 'Give it 32 random bytes, as a Buffer, a Uint8Array, or base64 (`openssl rand -base64 32`).';
+  let bytes: Buffer;
+  if (key instanceof Uint8Array) {
+    bytes = Buffer.from(key);
+  } else if (typeof key === 'string') {
+    // Buffer.from() skips what isn't base64, so a key with a typo would decode to other bytes instead of failing.
+    const text = key.trim();
+    if (text.length === 0) {
+      throw new TypeError(`AesGcmPayloadCodec: key "${id}" is an empty string. ${advice}`);
+    }
+    if (!/^[A-Za-z0-9+/_-]+={0,2}$/.test(text)) {
+      throw new TypeError(`AesGcmPayloadCodec: key "${id}" isn't base64. ${advice}`);
+    }
+    bytes = Buffer.from(text, 'base64');
+  } else {
+    const what = key === undefined ? "undefined (an environment variable that isn't set?)" : key === null ? 'null' : typeof key === 'object' ? 'an object' : `a ${typeof key}`;
+    throw new TypeError(`AesGcmPayloadCodec: key "${id}" is ${what}. ${advice}`);
+  }
+
   if (bytes.length !== 32) {
     throw new TypeError(
       `AesGcmPayloadCodec: key "${id}" is ${bytes.length} bytes; AES-256 takes 32 (as a Buffer, or base64: \`openssl rand -base64 32\`).`,

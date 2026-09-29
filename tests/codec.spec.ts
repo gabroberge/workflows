@@ -79,6 +79,28 @@ describe.runIf(storeKind === 'memory')('AesGcmPayloadCodec', () => {
     expect(() => new AesGcmPayloadCodec({ keys: { 'k.1': KEY_1 }, current: 'k.1' })).toThrow('invalid key id "k.1"');
     expect(() => new AesGcmPayloadCodec({ keys: { k1: KEY_1 }, current: 'k1', compress: -1 })).toThrow('compress (-1) must be a number of bytes, or false.');
   });
+
+  it('names a key it was given nothing, or something else than 32 bytes of base64, for', () => {
+    const unset = process.env.WORKFLOWS_TEST_KEY_THAT_IS_NOT_SET;
+    expect(() => new AesGcmPayloadCodec({ keys: { '2026-09': unset!, '2026-03': KEY_2 }, current: '2026-09' })).toThrow(
+      new TypeError(
+        'AesGcmPayloadCodec: key "2026-09" is undefined (an environment variable that isn\'t set?). Give it 32 random bytes, as a Buffer, ' +
+          'a Uint8Array, or base64 (`openssl rand -base64 32`).',
+      ),
+    );
+    expect(() => new AesGcmPayloadCodec({ keys: { k1: null as never }, current: 'k1' })).toThrow('AesGcmPayloadCodec: key "k1" is null');
+    expect(() => new AesGcmPayloadCodec({ keys: { k1: 42 as never }, current: 'k1' })).toThrow('AesGcmPayloadCodec: key "k1" is a number');
+    expect(() => new AesGcmPayloadCodec({ keys: { k1: '' }, current: 'k1' })).toThrow('AesGcmPayloadCodec: key "k1" is an empty string');
+    expect(() => new AesGcmPayloadCodec({ keys: { k1: randomBytes(32).toString('hex') }, current: 'k1' })).toThrow(
+      'AesGcmPayloadCodec: key "k1" is 48 bytes; AES-256 takes 32',
+    );
+    expect(() => new AesGcmPayloadCodec({ keys: { k1: `${KEY_2.slice(0, 20)} !${KEY_2.slice(22)}` }, current: 'k1' })).toThrow(
+      'AesGcmPayloadCodec: key "k1" isn\'t base64',
+    );
+    // What `openssl rand -base64 32` prints, trailing newline included, and its base64url form both read as 32 bytes.
+    expect(() => new AesGcmPayloadCodec({ keys: { k1: `${KEY_2}\n` }, current: 'k1' })).not.toThrow();
+    expect(() => new AesGcmPayloadCodec({ keys: { k1: Buffer.from(KEY_2, 'base64').toString('base64url') }, current: 'k1' })).not.toThrow();
+  });
 });
 
 const approved = new WorkflowSignal<{ by: string; note: string }>('refund.approved');
