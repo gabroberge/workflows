@@ -942,7 +942,7 @@ export function workflowStoreContract(
       equal(all.filter((i) => !i.cancelRequested || i.wakeAt === FAR).map((i) => i.id), [], 'cancelled and due (wakeAt 3 or 4)');
     });
 
-    add('concurrent create() and requestCancel() of one id: one wins', async (t) => {
+    add('concurrent create(), requestCancel() and terminates of one id: one wins', async (t) => {
       const created = await Promise.all(Array.from({ length: 8 }, (_, i) => jitter().then(() => t.store.create({ id: 'same', workflow: 'w', version: 1, input: i, deadline: null, now: i }))));
       equal(created.filter((r) => r.created).length, 1, 'created once');
       const winner = created.find((r) => r.created)!.instance;
@@ -950,6 +950,8 @@ export function workflowStoreContract(
 
       const accepted = await Promise.all(Array.from({ length: 8 }, (_, i) => jitter().then(() => t.store.requestCancel('same', { reason: `r${i}`, now: 10, terminate: false }))));
       equal(accepted.filter(Boolean).length, 1, 'one cancel accepted');
+      const terminated = await Promise.all(Array.from({ length: 8 }, (_, i) => jitter().then(() => t.store.requestCancel('same', { reason: `t${i}`, now: 11, terminate: true }))));
+      equal(terminated.filter(Boolean).length, 1, 'one terminate accepted');
     });
 
     add('purge() racing finishing, starting and signalling instances deletes only what was finished and unreachable', async (t) => {

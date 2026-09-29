@@ -22,7 +22,7 @@ describe.runIf(storeKind === 'memory')('workflowStoreContract()', () => {
       'signalInTransaction() stores a dedupeId once per commit, and a rolled-back signal leaves its id free',
     ]);
     const added = concurrent.filter((name) => !base.includes(name));
-    expect(added).toEqual(expect.arrayContaining(['concurrent claims never return the same instance twice', 'concurrent create() and requestCancel() of one id: one wins']));
+    expect(added).toEqual(expect.arrayContaining(['concurrent claims never return the same instance twice', 'concurrent create(), requestCancel() and terminates of one id: one wins']));
     expect(concurrent.slice(0, base.length)).toEqual(base);
   });
 

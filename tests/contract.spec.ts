@@ -124,6 +124,7 @@ if (storeKind === 'memory') {
       expect(await failures(() => new NoTerminate())).toEqual([
         'renew() extends the lease and reads the cancel flags while the token is current, and returns null after',
         'requestCancel() with terminate accepts once, also after a cancel and for a compensating instance',
+        'concurrent create(), requestCancel() and terminates of one id: one wins',
       ]);
       expect(await failures(() => new NoWriteSignal())).toEqual([
         'write() with a signal records it as signal() does, only when the write lands',
