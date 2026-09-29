@@ -119,15 +119,16 @@ export class WorkflowSchedules {
   }
 
   /**
-   * Stops starting occurrences until `resume()`; the instances it started keep running. A declared schedule stays
-   * paused across deploys. Throws `WorkflowNotFoundError` for an unknown id.
+   * Stops starting occurrences until `resume()`, at once: a worker that is starting the schedule's occurrences at
+   * that moment starts only those it had already decided on. The instances it started keep running. A declared
+   * schedule stays paused across deploys. Throws `WorkflowNotFoundError` for an unknown id.
    */
   async pause(id: string): Promise<WorkflowSchedule> {
     const saved = await this.scheduler.modify(id, (current) => {
       if (!current) {
         throw notFound(id);
       }
-      return current.paused ? null : { ...fieldsOf(current), paused: true, releaseLease: false };
+      return current.paused ? null : { ...fieldsOf(current), paused: true, releaseLease: true };
     });
     return this.scheduler.view(saved!);
   }

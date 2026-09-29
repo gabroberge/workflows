@@ -150,9 +150,12 @@ export class WorkflowScheduler implements OnApplicationBootstrap {
 
     const previous = current.state as ScheduleState;
     const retimed = !sameTiming(current.spec as ScheduleSpec, next.spec);
-    const ended = limitReached(next.spec, previous.runs);
+    // A retimed schedule drops its buffered occurrence, which then never starts: it no longer counts.
+    const runs = retimed && previous.buffered !== null ? previous.runs - 1 : previous.runs;
+    const ended = limitReached(next.spec, runs);
     const state: ScheduleState = {
       ...previous,
+      runs,
       next: ended ? null : retimed ? nextOccurrence(next.spec, now) : (previous.next ?? nextOccurrence(next.spec, now)),
       buffered: retimed ? null : previous.buffered,
     };

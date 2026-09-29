@@ -475,6 +475,41 @@ describe('crashes and takeovers', () => {
     expect(await a.client.schedules.get('crashy')).toMatchObject({ runs: 1, nextAt: hours(2) });
   });
 
+  it('pauses at once: a worker deciding the occurrences at that moment starts none it had not decided on', async () => {
+    const node = await start();
+    await node.client.schedules.upsert('paused-mid-way', { workflow: TickWorkflow, every: '1h' });
+    const list = node.store.list.bind(node.store);
+    vi.spyOn(node.store, 'list').mockImplementation(async (query) => {
+      // The worker has leased the schedule and looks at its running instances: the pause comes now.
+      if (query.scheduleId === 'paused-mid-way' && !(await node.client.schedules.get('paused-mid-way'))!.paused) {
+        await node.client.schedules.pause('paused-mid-way');
+      }
+      return list(query);
+    });
+
+    clock.set(hours(1));
+    await node.worker.drain();
+    expect(await node.client.list({ scheduleId: 'paused-mid-way' })).toEqual([]);
+    expect(await node.client.schedules.get('paused-mid-way')).toMatchObject({ paused: true, runs: 0 });
+  });
+
+  it("drops a buffered occurrence when the schedule's timing changes, and stops counting it", async () => {
+    const node = await start();
+    await node.client.schedules.upsert('retimed-buffer', { workflow: LongWorkflow, every: '1h', overlap: 'buffer-one', limit: 3 });
+    for (const at of [1, 2]) {
+      clock.set(hours(at));
+      await node.worker.drain();
+    }
+    expect(await node.client.schedules.get('retimed-buffer')).toMatchObject({ runs: 2, bufferedAt: hours(2) });
+
+    clock.set(hours(2.25));
+    expect(await node.client.schedules.upsert('retimed-buffer', { workflow: LongWorkflow, every: '30m', overlap: 'buffer-one', limit: 3 })).toMatchObject({
+      runs: 1,
+      bufferedAt: null,
+      nextAt: hours(2.5),
+    });
+  });
+
   it("leaves a retimed schedule's start in flight to the next worker, which makes it once", async () => {
     const node = await start();
     await node.client.schedules.upsert('retimed', { workflow: TickWorkflow, every: '1h' });
