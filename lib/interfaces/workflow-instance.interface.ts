@@ -46,13 +46,16 @@ export interface WorkflowInstance {
 export interface WorkflowJournalEntry {
   name: string;
   /** `retry`: an operator's `WorkflowClient.retry()`, recorded under `$retry:<n>` with what it retried in `data`. */
-  kind: 'step' | 'sleep' | 'signal' | 'commit' | 'now' | 'random' | 'uuid' | 'compensation' | 'retry';
+  kind: 'step' | 'sleep' | 'signal' | 'any' | 'commit' | 'now' | 'random' | 'uuid' | 'compensation' | 'retry';
   /**
    * `cancelled`: still pending (a sleep, a wait, a retry backoff) when the
    * instance ended as `cancelled`, `failed` or `compensation_failed`.
    */
   status: 'pending' | 'completed' | 'failed' | 'cancelled';
-  /** JSON-safe step result, signal `{ signalId, payload }`, or helper value. */
+  /**
+   * JSON-safe step result, signal `{ signalId, payload }`, `waitForAny()` winner
+   * `{ key, signalId, payload }` (`signalId: null` for a timer), or helper value.
+   */
   result?: unknown;
   error?: SerializedWorkflowError;
   /** Attempts started (steps and compensations). */
@@ -61,7 +64,7 @@ export interface WorkflowJournalEntry {
   wakeAt?: number | null;
   /** Last `heartbeat(progress)` checkpoint. */
   progress?: unknown;
-  /** Wait spec (`{ signal, key }`). */
+  /** Wait spec (`{ signal, key }`), or a `waitForAny()`'s conditions (`{ waits, timers }`). */
   data?: unknown;
   updatedAt?: number;
 }

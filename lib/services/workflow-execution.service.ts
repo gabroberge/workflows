@@ -22,6 +22,7 @@ import type {
   Journaled,
   WaitForSignalOptions,
   WorkflowCompensationContext,
+  WorkflowCondition,
   WorkflowContext,
   WorkflowStepContext,
   WorkflowStepOptions,
@@ -39,7 +40,7 @@ import type { WorkflowJournalLimits } from '../interfaces/workflows-module-optio
 import type { WorkflowEvents } from '../events/workflow-events.service.js';
 import type { WorkflowEvent } from '../events/workflow-events.interface.js';
 import { signalName, type WorkflowSignal } from '../signals/workflow.signal.js';
-import type { WorkflowStore } from '../interfaces/workflow-store.interface.js';
+import type { WorkflowSignalRecord, WorkflowStore } from '../interfaces/workflow-store.interface.js';
 
 /** An instance under a worker's lease. */
 export interface ClaimedWorkflowInstance extends WorkflowInstance {
@@ -101,6 +102,42 @@ export type CompensationOutcome =
   | { state: 'suspended'; wakeAt: number | null }
   | { state: 'failed'; error: SerializedWorkflowError }
   | { state: 'interrupted' };
+
+/**
+ * What `ctx.signalWait()` and `ctx.timer()` make for `ctx.waitForAny()`: a description of what to
+ * wait for, and how the winner's journaled payload becomes its value.
+ */
+export class Condition {
+  private constructor(
+    readonly wait: WorkflowWait | null,
+    readonly match: ((payload: any) => boolean) | undefined,
+    readonly timer: Duration | { until: Date | number } | undefined,
+    readonly settle: (payload: unknown) => unknown,
+  ) {}
+
+  static signal(wait: WorkflowWait, match?: (payload: any) => boolean, settle: (payload: unknown) => unknown = (payload) => payload): Condition {
+    return new Condition(wait, match, undefined, settle);
+  }
+
+  static timer(when: Duration | { until: Date | number }): Condition {
+    // Checked now, where the mistake is: the deadline itself is fixed when the wait is reached.
+    wakeTime('timer', when, 0);
+    return new Condition(null, undefined, when, () => null);
+  }
+}
+
+/** A `waitForAny()` journal entry's `data`: its conditions, with each timer's deadline. */
+interface AnyData {
+  waits: Record<string, WorkflowWait>;
+  timers: Record<string, number>;
+}
+
+/** A `waitForAny()` journal entry's `result`: the winner. */
+interface AnyOutcome {
+  key: string;
+  signalId: number | null;
+  payload: unknown;
+}
 
 /** Step or compensation options, validated before the attempt is recorded. */
 interface AttemptPlan {
@@ -191,7 +228,7 @@ export class WorkflowExecution {
 
     for (const entry of journal) {
       const signalId = (entry.result as { signalId?: unknown } | undefined)?.signalId;
-      if (entry.kind === 'signal' && typeof signalId === 'number') {
+      if ((entry.kind === 'signal' || entry.kind === 'any') && typeof signalId === 'number') {
         this.consumed.add(signalId);
       }
     }
@@ -203,6 +240,9 @@ export class WorkflowExecution {
       step: (name, fn, options) => this.track(this.step(name, fn, options)),
       sleep: (name, duration) => this.track(this.sleep(name, duration)),
       waitForSignal: (name, signal, options) => this.track(this.waitForSignal(name, signal, options)),
+      waitForAny: (name, conditions) => this.track(this.waitForAny(name, conditions)) as Promise<any>,
+      signalWait: (signal, options = {}) => Condition.signal({ signal: signalName(signal), key: options.key ?? null }, options.match) as WorkflowCondition<any>,
+      timer: (when) => Condition.timer(when) as WorkflowCondition<null>,
       now: () => this.helper('now', () => this.deps.clock.now()),
       random: () => this.helper('random', () => Math.random()),
       uuid: () => this.helper('uuid', () => randomUUID()),
@@ -430,28 +470,11 @@ export class WorkflowExecution {
       this.stage({ name, kind: 'signal', status: 'pending', attempts: 0, wakeAt: deadline, data: wait });
     }
 
-    // Signals sent since the instance started, up to this execution's cursor.
-    // A signal that arrived before the wait was reached still counts.
-    const candidates = await this.deps.store.signals({
-      name: wait.signal,
-      key: wait.key,
-      afterId: this.instance.signalCursor,
-      upToId: this.signalCursor,
-    });
+    const candidates = await this.signalsFor(wait);
     this.assertAlive();
 
-    for (const candidate of candidates) {
-      if (this.consumed.has(candidate.id)) {
-        continue;
-      }
-      if (deadline !== null && candidate.createdAt > deadline) {
-        continue;
-      }
-      if (options.match && !options.match(candidate.payload as Journaled<T>)) {
-        continue;
-      }
-
-      this.consumed.add(candidate.id);
+    const candidate = this.take(candidates, deadline, options.match);
+    if (candidate) {
       await this.write([
         {
           name,
@@ -475,7 +498,103 @@ export class WorkflowExecution {
       return null;
     }
 
-    throw this.suspendUntil(deadline, wait);
+    throw this.suspendUntil(deadline, [wait]);
+  }
+
+  private async waitForAny(name: string, conditions: Record<string, unknown>): Promise<{ key: string; value: unknown }> {
+    this.assertNotInStep(`waitForAny("${name}")`);
+    const branches = conditionsOf(name, conditions);
+    this.visit(name, 'any');
+    const entry = unlessCancelled(this.journal.get(name));
+    if (entry?.status === 'completed') {
+      const won = entry.result as AnyOutcome;
+      const branch = branches.get(won.key);
+      const type = won.signalId === null ? 'timer' : 'signal';
+      if (!branch || (branch.wait === null) !== (type === 'timer')) {
+        throw this.setFatal(
+          new WorkflowNonDeterminismError(
+            `${this.describe()} does not match its journal: waitForAny("${name}") was won by its ${type} "${won.key}", which the code no ` +
+              `longer has. ${ADVICE}`,
+          ),
+        );
+      }
+      return { key: won.key, value: branch.settle(won.payload) };
+    }
+    if (this.mode !== 'run') {
+      throw this.interrupt('halt');
+    }
+
+    this.assertAlive();
+    // Timers count from when the wait was first reached: a replay keeps their deadlines.
+    const now = this.deps.clock.now();
+    const reached = entry?.data as AnyData | undefined;
+    const data: AnyData = { waits: {}, timers: {} };
+    for (const [key, branch] of branches) {
+      if (branch.wait) {
+        data.waits[key] = branch.wait;
+      } else {
+        data.timers[key] = reached?.timers[key] ?? wakeTime(`${name}: ${key}`, branch.timer!, now);
+      }
+    }
+    const deadlines = Object.values(data.timers);
+    const deadline = deadlines.length > 0 ? Math.min(...deadlines) : null;
+    const pending: WorkflowJournalEntry = { name, kind: 'any', status: 'pending', attempts: 0, wakeAt: deadline, data };
+    if (!entry) {
+      this.stage(pending);
+    }
+
+    // Read every signal condition's candidates first, then pick without awaiting in between, so
+    // a parallel wait can't take the same signal.
+    const reads = [...branches].filter(([, branch]) => branch.wait !== null);
+    const candidates = await Promise.all(reads.map(([, branch]) => this.signalsFor(branch.wait!)));
+    this.assertAlive();
+
+    let winner: { key: string; branch: Condition; signal: WorkflowSignalRecord } | undefined;
+    for (const [i, [key, branch]] of reads.entries()) {
+      const signal = this.peek(candidates[i]!, deadline, branch.match);
+      if (signal && (!winner || signal.id < winner.signal.id)) {
+        winner = { key, branch, signal };
+      }
+    }
+
+    if (winner) {
+      this.consumed.add(winner.signal.id);
+      const outcome: AnyOutcome = { key: winner.key, signalId: winner.signal.id, payload: winner.signal.payload };
+      await this.write([{ ...pending, status: 'completed', result: outcome }]);
+      if (!winner.branch.wait!.signal.startsWith('$')) {
+        this.emit({ type: 'signal-received', wait: name, signal: winner.branch.wait!.signal, signalId: winner.signal.id });
+      }
+      return { key: winner.key, value: winner.branch.settle(winner.signal.payload) };
+    }
+
+    if (deadline !== null && this.deps.clock.now() >= deadline) {
+      const key = Object.keys(data.timers).find((timer) => data.timers[timer] === deadline)!;
+      await this.write([{ ...pending, status: 'completed', result: { key, signalId: null, payload: null } satisfies AnyOutcome }]);
+      return { key, value: null };
+    }
+
+    throw this.suspendUntil(deadline, Object.values(data.waits));
+  }
+
+  /** Signals sent since the instance started, up to this execution's cursor: one that arrived before the wait was reached still counts. */
+  private signalsFor(wait: WorkflowWait): Promise<WorkflowSignalRecord[]> {
+    return this.deps.store.signals({ name: wait.signal, key: wait.key, afterId: this.instance.signalCursor, upToId: this.signalCursor });
+  }
+
+  /** The first of `candidates` a wait can take: not taken by another wait, sent by `deadline`, and matching. */
+  private peek(candidates: WorkflowSignalRecord[], deadline: number | null, match: ((payload: any) => boolean) | undefined): WorkflowSignalRecord | undefined {
+    return candidates.find(
+      (candidate) => !this.consumed.has(candidate.id) && (deadline === null || candidate.createdAt <= deadline) && (!match || match(candidate.payload)),
+    );
+  }
+
+  /** `peek()`, and marks the signal taken. Call it with no `await` between the read and the take. */
+  private take(candidates: WorkflowSignalRecord[], deadline: number | null, match: ((payload: any) => boolean) | undefined): WorkflowSignalRecord | undefined {
+    const candidate = this.peek(candidates, deadline, match);
+    if (candidate) {
+      this.consumed.add(candidate.id);
+    }
+    return candidate;
   }
 
   private commit(name: string): void {
@@ -924,14 +1043,12 @@ export class WorkflowExecution {
     }
   }
 
-  private suspendUntil(wakeAt: number | null, wait?: WorkflowWait): WorkflowInterrupt {
+  private suspendUntil(wakeAt: number | null, waits: WorkflowWait[] = []): WorkflowInterrupt {
     this.suspension ??= { wakeAt: null, waits: [] };
     if (wakeAt !== null) {
       this.suspension.wakeAt = this.suspension.wakeAt === null ? wakeAt : Math.min(this.suspension.wakeAt, wakeAt);
     }
-    if (wait) {
-      this.suspension.waits.push(wait);
-    }
+    this.suspension.waits.push(...waits);
 
     return this.interrupt('suspend');
   }
@@ -1095,6 +1212,21 @@ function wakeTime(name: string, when: Duration | { until: Date | number }, now: 
     throw new TypeError(`Invalid deadline for sleep "${name}": ${String(when.until)}. Pass a valid Date or a timestamp in milliseconds.`);
   }
   return until;
+}
+
+/** `waitForAny()`'s conditions, checked before anything is journaled. */
+function conditionsOf(name: string, conditions: Record<string, unknown>): Map<string, Condition> {
+  const entries = conditions !== null && typeof conditions === 'object' ? Object.entries(conditions) : [];
+  if (entries.length === 0) {
+    throw new TypeError(`waitForAny("${name}") takes an object with at least one condition, such as { delivered: ctx.signalWait(shipmentDelivered) }.`);
+  }
+
+  for (const [key, condition] of entries) {
+    if (!(condition instanceof Condition)) {
+      throw new TypeError(`waitForAny("${name}"): "${key}" is not a condition. Make each one with ctx.signalWait() or ctx.timer().`);
+    }
+  }
+  return new Map(entries as Array<[string, Condition]>);
 }
 
 const COMPENSATE = '$compensate:';

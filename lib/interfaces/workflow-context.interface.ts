@@ -88,6 +88,28 @@ export interface WaitForSignalOptions<T> {
   timeout?: Duration;
 }
 
+declare const conditionValue: unique symbol;
+
+/**
+ * Something `ctx.waitForAny()` waits for, made by `ctx.signalWait()` or `ctx.timer()`. Only a
+ * description: nothing is waited for, and nothing journaled, until it is passed to `waitForAny()`.
+ */
+export interface WorkflowCondition<T = unknown> {
+  /** Type-only: the `value` `waitForAny()` returns when this condition wins. Never set at runtime. */
+  readonly [conditionValue]?: T;
+}
+
+/** What `ctx.signalWait()` takes: `waitForSignal()`'s options, without a timeout (race a `ctx.timer()` instead). */
+export type SignalWaitOptions<T> = Omit<WaitForSignalOptions<T>, 'timeout'>;
+
+/**
+ * What `ctx.waitForAny(name, conditions)` resolves with: the key of the condition that won, and
+ * its value, typed per key (check `key` to narrow `value`).
+ */
+export type WorkflowAnyResult<C extends Record<string, WorkflowCondition<unknown>>> = {
+  [K in keyof C & string]: { key: K; value: C[K] extends WorkflowCondition<infer T> ? T : never };
+}[keyof C & string];
+
 /**
  * The API a workflow's `run()` receives. `run()` executes again from the top every time an instance
  * resumes: https://docs.nestjs.com/reliability/workflows#rules-for-workflow-code.
@@ -120,6 +142,34 @@ export interface WorkflowContext {
     signal: WorkflowSignal<T> | string,
     options?: WaitForSignalOptions<T>,
   ): Promise<Journaled<T> | null>;
+  /**
+   * Durable wait for whichever of several conditions happens first: a signal
+   * (`ctx.signalWait()`) or a timer (`ctx.timer()`). Resolves with the key of the winner and its
+   * value (a signal's payload, `null` for a timer), journaled under `name` as one entry, so a
+   * replay returns the same winner. Only the winning signal is taken: a signal that matched
+   * another condition stays for a later wait. When several are ready at once, the earliest
+   * signal (lowest id) wins, then the earliest timer; a signal sent after a timer's deadline
+   * doesn't count. Timers count from when the wait is first reached.
+   *
+   * ```ts
+   * const outcome = await ctx.waitForAny('delivery-or-cancel', {
+   *   delivered: ctx.signalWait(shipmentDelivered, { key: order.id }),
+   *   cancelled: ctx.signalWait(orderCancelled, { key: order.id }),
+   *   timeout: ctx.timer('3d'),
+   * });
+   * if (outcome.key === 'delivered') {
+   *   await ctx.step('thank', () => this.mail.thank(order, outcome.value));
+   * }
+   * ```
+   *
+   * To wait for all of several signals, await several `waitForSignal()` calls with
+   * `Promise.all()`: each is journaled on its own, and the instance parks once for all of them.
+   */
+  waitForAny<C extends Record<string, WorkflowCondition<unknown>>>(name: string, conditions: C): Promise<WorkflowAnyResult<C>>;
+  /** A signal for `waitForAny()`: its value is the payload. */
+  signalWait<T>(signal: WorkflowSignal<T> | string, options?: SignalWaitOptions<T>): WorkflowCondition<Journaled<T>>;
+  /** A durable timer for `waitForAny()`: `duration` after the wait is first reached, or at `until`. Its value is `null`. */
+  timer(duration: Duration | { until: Date | number }): WorkflowCondition<null>;
   /**
    * Journaled `Date.now()`: the same value on every replay. Helpers are
    * numbered in call order, so call them from sequential code, not from

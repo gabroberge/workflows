@@ -14,8 +14,11 @@ export * from './decorators/index.js';
 export { WorkflowSignal } from './signals/index.js';
 export type {
   Journaled,
+  SignalWaitOptions,
   WaitForSignalOptions,
+  WorkflowAnyResult,
   WorkflowCompensationContext,
+  WorkflowCondition,
   WorkflowContext,
   WorkflowDecoratorOptions,
   WorkflowRetryOptions,
