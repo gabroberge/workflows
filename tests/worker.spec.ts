@@ -38,15 +38,19 @@ const start = async (workflows: any[], options: Omit<Parameters<typeof boot>[0],
   return node;
 };
 
-const busy = { active: 0, max: 0 };
+const busy = { active: 0, max: 0, started: 0 };
 
 @Workflow('busy')
 class Busy {
   async run(ctx: WorkflowContext) {
     await ctx.step('work', async () => {
       busy.active++;
+      busy.started++;
       busy.max = Math.max(busy.max, busy.active);
-      await new Promise((resolve) => setTimeout(resolve, 15));
+      // The executions of a round meet (of five, two at a time, the last round has one): whether they overlap
+      // doesn't depend on how fast the machine is.
+      const round = Math.ceil(busy.started / 2);
+      await waitFor(() => busy.started >= Math.min(round * 2, 5));
       busy.active--;
     });
   }
@@ -56,6 +60,7 @@ describe('drain()', () => {
   beforeEach(() => {
     busy.active = 0;
     busy.max = 0;
+    busy.started = 0;
   });
 
   it('runs at most `concurrency` executions at once, until none is due', async () => {
