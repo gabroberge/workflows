@@ -351,6 +351,24 @@ export async function boot(options: {
   };
 }
 
+/**
+ * Resolves once the node's heartbeats have read `flag` (a cancel or terminate requested elsewhere) twice: by then
+ * the execution has taken in the first read. Spies on the node's store until the test restores its mocks.
+ */
+export function heartbeatRead(node: Node, flag: 'cancelRequested' | 'terminateRequested'): Promise<void> {
+  const read = deferred();
+  const renew = node.store.renew.bind(node.store);
+  let reads = 0;
+  vi.spyOn(node.store, 'renew').mockImplementation(async (...args) => {
+    const flags = await renew(...args);
+    if (flags?.[flag] && ++reads === 2) {
+      read.resolve();
+    }
+    return flags;
+  });
+  return read.promise;
+}
+
 export function deferred<T = void>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((r) => (resolve = r));
