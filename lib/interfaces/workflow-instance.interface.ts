@@ -23,6 +23,8 @@ export interface WorkflowInstance {
   leaseOwner: string | null;
   leaseUntil: number | null;
   cancelRequested: boolean;
+  /** Set with `cancelRequested` by `WorkflowClient.terminate()`: stop without compensating. */
+  terminateRequested: boolean;
   cancelReason: string | null;
   /**
    * When the run timeout passes (`@Workflow(name, { timeout })` or `start()`'s `timeout`), or

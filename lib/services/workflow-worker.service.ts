@@ -143,14 +143,15 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
   }
 
   /**
-   * @internal After an accepted `WorkflowClient.cancel()` in this process: an
+   * @internal After an accepted `WorkflowClient.cancel()` or `terminate()` in this process: an
    * execution of the instance running here stops at its next `ctx` call now,
    * instead of when its next heartbeat reads the flag.
    */
-  noticeCancel(id: string): void {
+  noticeCancel(id: string, terminate = false): void {
     for (const running of this.running) {
       if (running.exec?.instance.id === id) {
         running.exec.cancelRequested = true;
+        running.exec.terminateRequested ||= terminate;
       }
     }
     this.kick();
@@ -297,6 +298,10 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
       if (this.stopped) {
         exec.requestShutdown();
       }
+      // Nothing of it runs any more, not even its compensations.
+      if (instance.terminateRequested) {
+        return await this.terminate(exec, instance);
+      }
 
       this.emit(instance, instance.runs === 1 ? { type: 'workflow-started' } : { type: 'workflow-resumed', run: instance.runs });
       const outcome = await exec.run(async () => definition.instance.run(exec.context, instance.input));
@@ -334,6 +339,9 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
     // woken again for that. The same goes for a run timeout.
     if (!outcome.ok && isWorkflowInterrupt(outcome.error) && outcome.error.reason === 'cancel') {
       const current = await this.store.get(instance.id);
+      if (current?.terminateRequested) {
+        return this.finish(exec, instance, 'cancelled', { error: terminated(current.cancelReason) });
+      }
       return this.compensate(exec, instance, cancelled(current?.cancelReason ?? null), false);
     }
     if (!outcome.ok && isWorkflowInterrupt(outcome.error) && outcome.error.reason === 'timeout') {
@@ -419,7 +427,16 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
       }
       case 'interrupted':
         await this.interrupted(exec, instance, false);
+        return;
+      case 'terminated':
+        return this.terminate(exec, instance);
     }
+  }
+
+  /** Ends the instance as `cancelled` without running (more of) its compensations. */
+  private async terminate(exec: WorkflowExecution, instance: ClaimedWorkflowInstance): Promise<void> {
+    const current = await this.store.get(instance.id);
+    return this.finish(exec, instance, 'cancelled', { error: terminated(current?.cancelReason ?? instance.cancelReason) });
   }
 
   /**
@@ -524,6 +541,10 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
 
 function cancelled(reason: string | null): SerializedWorkflowError {
   return { name: 'WorkflowCancelledError', message: reason ?? 'Cancelled.' };
+}
+
+function terminated(reason: string | null): SerializedWorkflowError {
+  return { name: 'WorkflowTerminatedError', message: reason ?? 'Terminated.' };
 }
 
 function timedOut(instance: ClaimedWorkflowInstance): SerializedWorkflowError {

@@ -1,5 +1,5 @@
 {
-  "id": "6da3922f-9b06-4494-85e7-1a0b95e1cad0",
+  "id": "434c40b3-5b21-4bff-b561-ec8e4fc6cdc5",
   "prevId": "aae1f06b-1318-499b-ae7a-26eaa6c95080",
   "version": "7",
   "dialect": "postgresql",
@@ -119,6 +119,13 @@
         },
         "cancel_requested": {
           "name": "cancel_requested",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "terminate_requested": {
+          "name": "terminate_requested",
           "type": "boolean",
           "primaryKey": false,
           "notNull": true,

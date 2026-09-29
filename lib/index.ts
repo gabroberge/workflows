@@ -96,6 +96,7 @@ export { WorkflowStorage } from './storage/index.js';
 export type {
   NewWorkflowInstance,
   NewWorkflowSignal,
+  WorkflowCancelRequest,
   WorkflowClaim,
   WorkflowClaimRequest,
   WorkflowInstanceDetails,

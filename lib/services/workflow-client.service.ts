@@ -242,15 +242,30 @@ export class WorkflowClient {
    * already compensating is not accepted. Throws `WorkflowNotFoundError` for an
    * unknown id.
    */
-  async cancel(id: string, reason?: string): Promise<WorkflowCancelResult> {
-    const accepted = await this.store.requestCancel(id, reason ?? null, this.clock.now());
+  cancel(id: string, reason?: string): Promise<WorkflowCancelResult> {
+    return this.stop(id, reason, false);
+  }
+
+  /**
+   * Stops an instance without running its compensations, for one that can't or mustn't finish
+   * on its own: a parked one wakes at once, a running one stops at its next `ctx` call (its
+   * current step finishes first), and a compensating one after its current compensation. It
+   * ends as `cancelled` with a `WorkflowTerminatedError` whose message is `reason`. Accepted
+   * after a `cancel()` too. Throws `WorkflowNotFoundError` for an unknown id.
+   */
+  terminate(id: string, reason?: string): Promise<WorkflowCancelResult> {
+    return this.stop(id, reason, true);
+  }
+
+  private async stop(id: string, reason: string | undefined, terminate: boolean): Promise<WorkflowCancelResult> {
+    const accepted = await this.store.requestCancel(id, { reason: reason ?? null, now: this.clock.now(), terminate });
     const details = await this.store.get(id);
     if (!details) {
       throw new WorkflowNotFoundError(`No workflow instance with id "${id}".`);
     }
 
     if (accepted) {
-      this.worker.noticeCancel(id);
+      this.worker.noticeCancel(id, terminate);
     }
 
     const { waits: _waits, journal: _journal, ...instance } = details;

@@ -90,7 +90,8 @@ export interface WorkflowCancelResult extends WorkflowInstance {
   /**
    * True if this call requested the cancellation. False if the instance was
    * already compensating or had finished, or a cancel was already requested
-   * (the first reason is kept).
+   * (the first reason is kept). For `terminate()`: false if the instance had
+   * finished or a terminate was already requested.
    */
   accepted: boolean;
 }

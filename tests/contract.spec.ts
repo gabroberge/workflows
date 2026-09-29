@@ -46,7 +46,7 @@ if (storeKind === 'memory') {
 // The suite itself, once: it needs no database.
 if (storeKind === 'memory') {
   describe('the contract suite', () => {
-    it('fails a store that loses a wake-up, one that skips the fence, one that ignores dedupe ids, and one that drops the custom status', async () => {
+    it('fails a store that loses a wake-up, one that skips the fence, one that ignores dedupe ids, one that drops the custom status, and one that ignores terminates', async () => {
       /** Registers waits without looking for signals that arrived after the execution's cursor. */
       class NoMissedSignalCheck extends InMemoryWorkflowStore {
         override async write(...[id, token, write]: Parameters<InMemoryWorkflowStore['write']>) {
@@ -66,6 +66,13 @@ if (storeKind === 'memory') {
       class NoCustomStatus extends InMemoryWorkflowStore {
         override async write(...[id, token, write]: Parameters<InMemoryWorkflowStore['write']>) {
           return super.write(id, token, { ...write, customStatus: undefined });
+        }
+      }
+
+      /** Takes a terminate for a cancel. */
+      class NoTerminate extends InMemoryWorkflowStore {
+        override async requestCancel(...[id, request]: Parameters<InMemoryWorkflowStore['requestCancel']>) {
+          return super.requestCancel(id, { ...request, terminate: false });
         }
       }
 
@@ -92,6 +99,10 @@ if (storeKind === 'memory') {
         'concurrent signals with one dedupeId store it once, and every call returns its id',
       ]);
       expect(await failures(() => new NoCustomStatus())).toEqual(['write() sets the custom status under the lease, and leaves it as it is when not given']);
+      expect(await failures(() => new NoTerminate())).toEqual([
+        'renew() extends the lease and reads the cancel flags while the token is current, and returns null after',
+        'requestCancel() with terminate accepts once, also after a cancel and for a compensating instance',
+      ]);
       expect(await failures(() => new ExpiryFence())).toEqual(
         expect.arrayContaining(['write() changes nothing under a stale token', "a stale lease holder's writes never land, however they interleave with the new holder's"]),
       );

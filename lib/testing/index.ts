@@ -78,6 +78,7 @@ export function workflowStoreContract(
         leaseOwner: null,
         leaseUntil: null,
         cancelRequested: false,
+        terminateRequested: false,
         cancelReason: null,
         deadline: null,
         customStatus: null,
@@ -166,14 +167,16 @@ export function workflowStoreContract(
     equal((await t.claim(FAR, { token: 't3' })).instances.map((i) => i.id), ['a'], "'b' finished: never claimed again");
   });
 
-  add('renew() extends the lease and reads the cancel flag while the token is current, and returns null after', async (t) => {
+  add('renew() extends the lease and reads the cancel flags while the token is current, and returns null after', async (t) => {
     await t.create('a');
     await t.claim(1, { token: 't1' });
 
-    equal(await t.store.renew('a', 't1', 5_000), { cancelRequested: false }, 'renewed');
+    equal(await t.store.renew('a', 't1', 5_000), { cancelRequested: false, terminateRequested: false }, 'renewed');
     expect(await t.store.get('a'), { leaseUntil: 5_000 }, 'the new lease');
-    equal(await t.store.requestCancel('a', 'stop', 2), true, 'cancel requested');
-    equal(await t.store.renew('a', 't1', 6_000), { cancelRequested: true }, 'renew reads the flag');
+    equal(await t.store.requestCancel('a', { reason: 'stop', now: 2, terminate: false }), true, 'cancel requested');
+    equal(await t.store.renew('a', 't1', 6_000), { cancelRequested: true, terminateRequested: false }, 'renew reads the flag');
+    equal(await t.store.requestCancel('a', { reason: 'now', now: 3, terminate: true }), true, 'terminate requested');
+    equal(await t.store.renew('a', 't1', 6_000), { cancelRequested: true, terminateRequested: true }, 'renew reads both flags');
     equal(await t.store.renew('a', 'other', 7_000), null, 'another token');
     equal(await t.store.renew('missing', 't1', 7_000), null, 'an unknown id');
     expect(await t.store.get('a'), { leaseUntil: 6_000 }, 'unchanged by a stale renew');
@@ -436,29 +439,61 @@ export function workflowStoreContract(
     await t.store.write('compensating', 't', { now: 1, entries: [], status: 'compensating', error: { name: 'E', message: 'x' } });
     await t.store.write('done', 't', { now: 1, entries: [], status: 'completed', error: null, release: { wakeAt: null, waits: [], signalCursor: 0 } });
 
-    equal(await t.store.requestCancel('suspended', 'Changed my mind.', 10), true, 'suspended');
+    equal(await t.store.requestCancel('suspended', { reason: 'Changed my mind.', now: 10, terminate: false }), true, 'suspended');
     expect(await t.store.get('suspended'), { status: 'suspended', cancelRequested: true, cancelReason: 'Changed my mind.', wakeAt: 10, updatedAt: 10 }, 'due now');
-    equal(await t.store.requestCancel('suspended', 'Again.', 11), false, 'a repeated request');
+    equal(await t.store.requestCancel('suspended', { reason: 'Again.', now: 11, terminate: false }), false, 'a repeated request');
     expect(await t.store.get('suspended'), { cancelReason: 'Changed my mind.', wakeAt: 10 }, 'the first reason stays');
 
-    equal(await t.store.requestCancel('pending', null, 12), true, 'pending');
+    equal(await t.store.requestCancel('pending', { reason: null, now: 12, terminate: false }), true, 'pending');
     expect(await t.store.get('pending'), { cancelRequested: true, cancelReason: null, wakeAt: 12 }, 'pending, due now');
-    equal(await t.store.requestCancel('pending-later', null, 12), true, 'pending, not yet due');
+    equal(await t.store.requestCancel('pending-later', { reason: null, now: 12, terminate: false }), true, 'pending, not yet due');
     expect(await t.store.get('pending-later'), { wakeAt: 12 }, 'due now');
 
-    equal(await t.store.requestCancel('running', 'r', 13), true, 'running');
+    equal(await t.store.requestCancel('running', { reason: 'r', now: 13, terminate: false }), true, 'running');
     expect(await t.store.get('running'), { cancelRequested: true, wakeAt: 0 }, 'an instance already due keeps its wakeAt');
 
-    equal(await t.store.requestCancel('compensating', 'x', 14), false, 'compensating');
-    equal(await t.store.requestCancel('done', 'x', 15), false, 'finished');
-    equal(await t.store.requestCancel('missing', 'x', 16), false, 'unknown');
+    equal(await t.store.requestCancel('compensating', { reason: 'x', now: 14, terminate: false }), false, 'compensating');
+    equal(await t.store.requestCancel('done', { reason: 'x', now: 15, terminate: false }), false, 'finished');
+    equal(await t.store.requestCancel('missing', { reason: 'x', now: 16, terminate: false }), false, 'unknown');
     expect(await t.store.get('done'), { status: 'completed', cancelRequested: false }, 'finished: unchanged');
+  });
+
+  add('requestCancel() with terminate accepts once, also after a cancel and for a compensating instance', async (t) => {
+    for (const id of ['suspended', 'cancelled-first', 'compensating', 'done']) {
+      await t.create(id, 0);
+    }
+    await t.claim(1, { token: 't' });
+    await t.store.write('suspended', 't', { now: 1, entries: [], status: 'suspended', release: { wakeAt: FAR, waits: [], signalCursor: 0 } });
+    await t.store.write('compensating', 't', { now: 1, entries: [], status: 'compensating', error: { name: 'E', message: 'x' }, release: { wakeAt: FAR, waits: [], signalCursor: 0 } });
+    await t.store.write('done', 't', { now: 1, entries: [], status: 'completed', error: null, release: { wakeAt: null, waits: [], signalCursor: 0 } });
+    const terminate = (id: string, reason: string | null, now: number) => t.store.requestCancel(id, { reason, now, terminate: true });
+
+    equal(await terminate('suspended', 'Stuck on a retired carrier.', 10), true, 'suspended');
+    expect(
+      await t.store.get('suspended'),
+      { status: 'suspended', cancelRequested: true, terminateRequested: true, cancelReason: 'Stuck on a retired carrier.', wakeAt: 10, updatedAt: 10 },
+      'terminate requested, due now',
+    );
+    equal(await terminate('suspended', 'Again.', 11), false, 'a repeated terminate');
+    equal(await t.store.requestCancel('suspended', { reason: 'Later.', now: 12, terminate: false }), false, 'a cancel after it');
+    expect(await t.store.get('suspended'), { cancelReason: 'Stuck on a retired carrier.' }, 'the reason stays');
+
+    equal(await t.store.requestCancel('cancelled-first', { reason: 'Cancel.', now: 13, terminate: false }), true, 'a cancel first');
+    expect(await t.store.get('cancelled-first'), { cancelRequested: true, terminateRequested: false }, 'cancelled, not terminated');
+    equal(await terminate('cancelled-first', 'Terminate.', 14), true, 'a terminate after a cancel');
+    expect(await t.store.get('cancelled-first'), { status: 'running', terminateRequested: true, cancelReason: 'Terminate.' }, 'its reason replaced');
+
+    equal(await terminate('compensating', 'Stop undoing.', 15), true, 'compensating');
+    expect(await t.store.get('compensating'), { status: 'compensating', cancelRequested: true, terminateRequested: true, wakeAt: 15 }, 'due now');
+    equal(await terminate('done', 'x', 16), false, 'finished');
+    equal(await terminate('missing', 'x', 17), false, 'unknown');
+    expect(await t.store.get('done'), { status: 'completed', cancelRequested: false, terminateRequested: false }, 'finished: unchanged');
   });
 
   add('write() keeps a suspending instance with a pending cancel due, but not a compensating one', async (t) => {
     await t.create('a');
     await t.claim(1, { token: 't' });
-    await t.store.requestCancel('a', null, 2);
+    await t.store.requestCancel('a', { reason: null, now: 2, terminate: false });
     await t.store.write('a', 't', { now: 20, entries: [], status: 'suspended', release: { wakeAt: FAR, waits: [], signalCursor: 0 } });
     expect(await t.store.get('a'), { status: 'suspended', wakeAt: 20 }, 'suspended with a cancel: due now');
 
@@ -739,7 +774,7 @@ export function workflowStoreContract(
       await Promise.all(
         instances.map(async (instance) => {
           await Promise.all([
-            jitter().then(() => t.store.requestCancel(instance.id, 'stop', 3)),
+            jitter().then(() => t.store.requestCancel(instance.id, { reason: 'stop', now: 3, terminate: false })),
             jitter().then(() =>
               t.store.write(instance.id, 't', { now: 4, entries: [], status: 'suspended', release: { wakeAt: FAR, waits: [], signalCursor: 0 } }),
             ),
@@ -757,7 +792,7 @@ export function workflowStoreContract(
       const winner = created.find((r) => r.created)!.instance;
       equal(created.filter((r) => !isDeepStrictEqual(r.instance.input, winner.input)).length, 0, 'every call returns the stored instance');
 
-      const accepted = await Promise.all(Array.from({ length: 8 }, (_, i) => jitter().then(() => t.store.requestCancel('same', `r${i}`, 10))));
+      const accepted = await Promise.all(Array.from({ length: 8 }, (_, i) => jitter().then(() => t.store.requestCancel('same', { reason: `r${i}`, now: 10, terminate: false }))));
       equal(accepted.filter(Boolean).length, 1, 'one cancel accepted');
     });
 

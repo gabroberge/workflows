@@ -11,6 +11,7 @@ CREATE TABLE "workflow_instances" (
 	"lease_owner" text,
 	"lease_until" bigint,
 	"cancel_requested" boolean DEFAULT false NOT NULL,
+	"terminate_requested" boolean DEFAULT false NOT NULL,
 	"cancel_reason" text,
 	"deadline" bigint,
 	"custom_status" jsonb,

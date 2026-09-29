@@ -30,6 +30,7 @@ export const workflowInstances = pgTable(
     leaseOwner: text('lease_owner'),
     leaseUntil: bigint('lease_until', { mode: 'number' }),
     cancelRequested: boolean('cancel_requested').notNull().default(false),
+    terminateRequested: boolean('terminate_requested').notNull().default(false),
     cancelReason: text('cancel_reason'),
     deadline: bigint('deadline', { mode: 'number' }),
     customStatus: jsonb('custom_status'),

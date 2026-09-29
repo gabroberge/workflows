@@ -4,6 +4,7 @@ import {
   WorkflowStorage,
   type NewWorkflowInstance,
   type NewWorkflowSignal,
+  type WorkflowCancelRequest,
   type WorkflowClaim,
   type WorkflowClaimRequest,
   type WorkflowInstance,
@@ -93,11 +94,21 @@ export class DrizzleWorkflowStore implements WorkflowStore {
     return rows.map(toInstance);
   }
 
-  async requestCancel(id: string, reason: string | null, now: number): Promise<boolean> {
+  async requestCancel(id: string, { reason, now, terminate }: WorkflowCancelRequest): Promise<boolean> {
+    // A terminate also stops a compensating instance, and follows a cancel.
+    const applies = terminate
+      ? and(inArray(instances.status, RUNNABLE), eq(instances.terminateRequested, false))
+      : and(inArray(instances.status, CANCELLABLE), eq(instances.cancelRequested, false));
     const accepted = await this.db
       .update(instances)
-      .set({ cancelRequested: true, cancelReason: reason, updatedAt: now, wakeAt: sql`least(coalesce(${instances.wakeAt}, ${now}), ${now})` })
-      .where(and(eq(instances.id, id), inArray(instances.status, CANCELLABLE), eq(instances.cancelRequested, false)))
+      .set({
+        cancelRequested: true,
+        ...(terminate ? { terminateRequested: true } : {}),
+        cancelReason: reason,
+        updatedAt: now,
+        wakeAt: sql`least(coalesce(${instances.wakeAt}, ${now}), ${now})`,
+      })
+      .where(and(eq(instances.id, id), applies))
       .returning({ id: instances.id });
     return accepted.length === 1;
   }
@@ -227,7 +238,7 @@ export class DrizzleWorkflowStore implements WorkflowStore {
       .update(instances)
       .set({ leaseUntil })
       .where(and(eq(instances.id, id), eq(instances.leaseToken, token)))
-      .returning({ cancelRequested: instances.cancelRequested });
+      .returning({ cancelRequested: instances.cancelRequested, terminateRequested: instances.terminateRequested });
     return row ?? null;
   }
 

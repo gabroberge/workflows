@@ -49,13 +49,19 @@ export interface WorkflowStore {
   /** Instances matching every given filter, ordered by `createdAt`, then `id`; a page of them. */
   list(query: WorkflowListQuery): Promise<WorkflowInstance[]>;
   /**
-   * Sets `cancelRequested` and `cancelReason` on a `pending`, `running` or `suspended`
-   * instance whose `cancelRequested` is still false, makes it due now (`wakeAt` becomes `now`
-   * unless it is already due) and sets `updatedAt`. Returns whether it changed anything:
-   * `false` for an unknown id, a finished or compensating instance, or a repeated request.
-   * One conditional update: two concurrent requests accept one.
+   * A cancel: sets `cancelRequested` and `cancelReason` on a `pending`, `running` or
+   * `suspended` instance whose `cancelRequested` is still false.
+   *
+   * A terminate (`request.terminate`): sets `cancelRequested`, `terminateRequested` and
+   * `cancelReason` on a `pending`, `running`, `suspended` or `compensating` instance whose
+   * `terminateRequested` is still false, whether or not a cancel was requested before.
+   *
+   * Either way it makes the instance due now (`wakeAt` becomes `now` unless it is already due)
+   * and sets `updatedAt`, and returns whether it changed anything: `false` for an unknown id, a
+   * status it doesn't apply to, or a repeated request. One conditional update: of two
+   * concurrent requests of the same kind, one is accepted.
    */
-  requestCancel(id: string, reason: string | null, now: number): Promise<boolean>;
+  requestCancel(id: string, request: WorkflowCancelRequest): Promise<boolean>;
   /**
    * An operator's retry of a finished instance (`WorkflowClient.retry()`), as one conditional
    * write: if the instance holds no lease, its status is `expect.status` and its `runs` is
@@ -137,10 +143,10 @@ export interface WorkflowStore {
   claim(request: WorkflowClaimRequest): Promise<WorkflowClaim>;
   /**
    * Extends the lease to `leaseUntil` if `token` is still the instance's lease token, and
-   * returns its `cancelRequested`, or `null` (changing nothing) if the lease is gone. One
-   * conditional update.
+   * returns its `cancelRequested` and `terminateRequested`, or `null` (changing nothing) if the
+   * lease is gone. One conditional update.
    */
-  renew(id: string, token: string, leaseUntil: number): Promise<{ cancelRequested: boolean } | null>;
+  renew(id: string, token: string, leaseUntil: number): Promise<{ cancelRequested: boolean; terminateRequested: boolean } | null>;
   /**
    * Every write by the worker that holds the lease: journal entries, a status change, the
    * outcome, and handing the instance back. All or nothing, in one transaction, and only while
@@ -168,9 +174,17 @@ export interface NewWorkflowInstance {
   /**
    * `createdAt`, `updatedAt` and `wakeAt`. The new instance also gets `signalCursor` = the
    * last signal id (signals sent after it started can match its waits), `runs: 0`, no lease,
-   * no cancel request and `customStatus: null`.
+   * no cancel or terminate request and `customStatus: null`.
    */
   now: number;
+}
+
+/** What `WorkflowStore.requestCancel()` receives. */
+export interface WorkflowCancelRequest {
+  reason: string | null;
+  now: number;
+  /** `WorkflowClient.terminate()`: stop without compensating. */
+  terminate: boolean;
 }
 
 /** What `WorkflowStore.list()` receives: validated and defaulted by the engine. */

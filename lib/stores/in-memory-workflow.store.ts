@@ -8,6 +8,7 @@ import type {
 import type {
   NewWorkflowInstance,
   NewWorkflowSignal,
+  WorkflowCancelRequest,
   WorkflowClaim,
   WorkflowClaimRequest,
   WorkflowInstanceDetails,
@@ -99,6 +100,7 @@ export class InMemoryWorkflowStore implements WorkflowStore {
       leaseOwner: null,
       leaseUntil: null,
       cancelRequested: false,
+      terminateRequested: false,
       cancelReason: null,
       deadline: i.deadline,
       customStatus: null,
@@ -139,13 +141,15 @@ export class InMemoryWorkflowStore implements WorkflowStore {
       .map(copy);
   }
 
-  async requestCancel(id: string, reason: string | null, now: number): Promise<boolean> {
+  async requestCancel(id: string, { reason, now, terminate }: WorkflowCancelRequest): Promise<boolean> {
     const instance = this.rows.get(id)?.instance;
-    if (!instance || !CANCELLABLE.has(instance.status) || instance.cancelRequested) {
+    const applies = terminate ? RUNNABLE.has(instance?.status ?? '') && !instance!.terminateRequested : CANCELLABLE.has(instance?.status ?? '') && !instance!.cancelRequested;
+    if (!instance || !applies) {
       return false;
     }
 
     instance.cancelRequested = true;
+    instance.terminateRequested ||= terminate;
     instance.cancelReason = reason;
     instance.updatedAt = now;
     if (instance.wakeAt === null || instance.wakeAt > now) {
@@ -272,13 +276,13 @@ export class InMemoryWorkflowStore implements WorkflowStore {
     return { instances: due.map((row) => copy(row.instance)), lastSignalId: this.lastSignalId() };
   }
 
-  async renew(id: string, token: string, leaseUntil: number): Promise<{ cancelRequested: boolean } | null> {
+  async renew(id: string, token: string, leaseUntil: number): Promise<{ cancelRequested: boolean; terminateRequested: boolean } | null> {
     const row = this.leased(id, token);
     if (!row) {
       return null;
     }
     row.instance.leaseUntil = leaseUntil;
-    return { cancelRequested: row.instance.cancelRequested };
+    return { cancelRequested: row.instance.cancelRequested, terminateRequested: row.instance.terminateRequested };
   }
 
   async write(id: string, token: string, w: WorkflowWrite): Promise<boolean> {

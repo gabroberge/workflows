@@ -101,7 +101,8 @@ export type CompensationOutcome =
   | { state: 'done'; count: number }
   | { state: 'suspended'; wakeAt: number | null }
   | { state: 'failed'; error: SerializedWorkflowError }
-  | { state: 'interrupted' };
+  | { state: 'interrupted' }
+  | { state: 'terminated' };
 
 /**
  * What `ctx.signalWait()` and `ctx.timer()` make for `ctx.waitForAny()`: a description of what to
@@ -180,6 +181,8 @@ export class WorkflowExecution {
   shuttingDown = false;
   detached = false;
   cancelRequested = false;
+  /** A terminate was requested: stop compensating too. */
+  terminateRequested = false;
   /** Attempt counters to restore when a shutdown interrupts an attempt. */
   readonly rollbacks: WorkflowJournalEntry[] = [];
 
@@ -309,7 +312,7 @@ export class WorkflowExecution {
       return;
     }
 
-    let result: { cancelRequested: boolean } | null;
+    let result: { cancelRequested: boolean; terminateRequested: boolean } | null;
     try {
       result = await this.deps.store.renew(
         this.instance.id,
@@ -322,9 +325,11 @@ export class WorkflowExecution {
 
     if (!result) {
       this.loseLease();
-    } else if (result.cancelRequested) {
-      this.cancelRequested = true;
+      return;
     }
+
+    this.cancelRequested ||= result.cancelRequested;
+    this.terminateRequested ||= result.terminateRequested;
   }
 
   /** Runs registered compensations in reverse order, each as a journaled, retried step. */
@@ -336,6 +341,10 @@ export class WorkflowExecution {
     for (const compensation of [...this.compensations].reverse()) {
       if (!compensation.completed) {
         continue;
+      }
+      // A running compensation finishes; the next one doesn't start.
+      if (this.terminateRequested) {
+        return { state: 'terminated' };
       }
 
       const name = `${COMPENSATE}${compensation.step}`;
