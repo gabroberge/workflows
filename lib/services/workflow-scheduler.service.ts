@@ -103,6 +103,10 @@ export class WorkflowScheduler implements OnApplicationBootstrap {
    * kept) and removes the ones the workflows this process runs no longer declare.
    */
   private async sync(): Promise<void> {
+    if (this.registry.names().length === 0) {
+      return;
+    }
+
     const declared = this.registry.schedules();
     for (const [id, schedule] of declared) {
       await this.modify(id, (current) => {
