@@ -1,14 +1,18 @@
 import { applyDecorators, Injectable, SetMetadata } from '@nestjs/common';
 import { runTimeoutMs, toMs } from '../utils/duration.util.js';
+import { normalize } from '../utils/normalize.util.js';
+import { SCHEDULE_ID, scheduleSpec } from '../utils/schedule-spec.util.js';
 import { WORKFLOW_METADATA } from '../workflows.constants.js';
 import type {
   WorkflowConcurrency,
   WorkflowConcurrencyMetadata,
+  WorkflowDeclaredSchedule,
   WorkflowMetadata,
   WorkflowDecoratorOptions,
   WorkflowRateLimit,
   WorkflowRateLimitMetadata,
 } from '../interfaces/workflow-decorator-options.interface.js';
+import type { WorkflowScheduleDeclaration } from '../interfaces/workflow-schedule.interface.js';
 
 /**
  * Marks an injectable class with a `run(ctx, input)` method as a durable
@@ -28,7 +32,38 @@ export function Workflow(name: string, options: WorkflowDecoratorOptions = {}): 
   const timeout = options.timeout === undefined ? undefined : runTimeoutMs(options.timeout, `workflow "${name}"`);
   const concurrency = options.concurrency === undefined ? null : concurrencyOf(name, options.concurrency);
   const rateLimit = options.rateLimit === undefined ? null : rateLimitOf(name, options.rateLimit);
-  return applyDecorators(Injectable(), SetMetadata(WORKFLOW_METADATA, { name, version, timeout, concurrency, rateLimit } satisfies WorkflowMetadata));
+  const schedules = options.schedules === undefined ? [] : schedulesOf(name, options.schedules);
+  return applyDecorators(Injectable(), SetMetadata(WORKFLOW_METADATA, { name, version, timeout, concurrency, rateLimit, schedules } satisfies WorkflowMetadata));
+}
+
+function schedulesOf(name: string, schedules: WorkflowScheduleDeclaration[]): WorkflowDeclaredSchedule[] {
+  if (!Array.isArray(schedules)) {
+    throw new TypeError(`Workflow "${name}": schedules must be an array, such as [{ id: 'weekly-digest', cron: '0 8 * * MON' }].`);
+  }
+
+  const ids = new Set<string>();
+  return schedules.map((declaration) => {
+    const id = declaration?.id;
+    if (typeof id !== 'string' || !SCHEDULE_ID.test(id)) {
+      throw new TypeError(`Invalid schedule id ${JSON.stringify(id)} of workflow "${name}". Use letters, digits, ".", ":", "_" or "-".`);
+    }
+    if (ids.has(id)) {
+      throw new TypeError(`Workflow "${name}" declares schedule "${id}" twice.`);
+    }
+    ids.add(id);
+
+    const owner = `Schedule "${id}" of workflow "${name}"`;
+    const inputFn = typeof declaration.input === 'function';
+    let input: unknown = declaration.input;
+    if (!inputFn) {
+      try {
+        input = normalize(declaration.input);
+      } catch (error) {
+        throw new TypeError(`${owner}: its input is not JSON-serializable: ${(error as Error).message}`);
+      }
+    }
+    return { id, spec: scheduleSpec(owner, declaration, { version: null, inputFn }), input };
+  });
 }
 
 function concurrencyOf(name: string, concurrency: WorkflowConcurrency | WorkflowConcurrency[]): WorkflowConcurrencyMetadata {

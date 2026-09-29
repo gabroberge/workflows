@@ -1,4 +1,6 @@
 import type { Duration } from '../utils/duration.util.js';
+import type { ScheduleSpec } from '../utils/schedule-spec.util.js';
+import type { WorkflowScheduleDeclaration } from './workflow-schedule.interface.js';
 
 export interface WorkflowMetadata {
   name: string;
@@ -9,6 +11,16 @@ export interface WorkflowMetadata {
   concurrency?: WorkflowConcurrencyMetadata | null;
   /** `null`: no limit. `undefined`: not known here, as for `concurrency`. */
   rateLimit?: WorkflowRateLimitMetadata | null;
+  /** `@Workflow(name, { schedules })`, validated. */
+  schedules?: WorkflowDeclaredSchedule[];
+}
+
+/** One of `@Workflow(name, { schedules })`, validated: its spec (as the store keeps it) and its input. */
+export interface WorkflowDeclaredSchedule {
+  id: string;
+  spec: ScheduleSpec;
+  /** A JSON value (normalized), or a function of the occurrence. */
+  input: unknown;
 }
 
 /** `@Workflow(name, { concurrency })`, validated. */
@@ -99,4 +111,13 @@ export interface WorkflowDecoratorOptions {
    * workflow, with the highest registered version's limits. Default: none.
    */
   rateLimit?: WorkflowRateLimit | WorkflowRateLimit[];
+  /**
+   * Starts instances on a schedule: a `cron` expression, an interval (`every`) or an RFC 5545 `rrule`, in a
+   * time zone (`tz`), with an `id` unique across the application. Kept in step with the code: a worker that
+   * starts saves the schedules its highest registered version of the workflow declares, and removes the ones
+   * it no longer does. Each occurrence starts one instance, whose id is `<schedule id>@<ISO time of the
+   * occurrence>`, however many workers there are; `WorkflowSchedules` pauses, resumes, triggers and lists
+   * them. Default: none.
+   */
+  schedules?: WorkflowScheduleDeclaration[];
 }

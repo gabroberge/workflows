@@ -17,6 +17,7 @@ import { WorkflowStorage } from '../storage/workflow.storage.js';
 import { stepSignalId, stepStartId } from '../utils/step-scope.util.js';
 import type { WorkflowInstanceDetails, WorkflowPurgeResult, WorkflowStore } from '../interfaces/workflow-store.interface.js';
 import { WorkflowRegistry } from './workflow-registry.service.js';
+import { WorkflowSchedules } from './workflow-schedules.service.js';
 import { WorkflowWorker } from './workflow-worker.service.js';
 import { WORKFLOWS_MODULE_OPTIONS } from '../workflows.module-definition.js';
 import { CHILD_ENDED_SIGNAL } from '../workflows.constants.js';
@@ -49,6 +50,8 @@ export class WorkflowClient {
     private readonly registry: WorkflowRegistry,
     private readonly worker: WorkflowWorker,
     private readonly events: WorkflowEvents,
+    /** The schedules that start instances: `upsert()`, `get()`, `list()`, `pause()`, `resume()`, `trigger()`... */
+    readonly schedules: WorkflowSchedules,
   ) {
     this.clock = options.clock ?? systemClock;
   }
@@ -221,7 +224,7 @@ export class WorkflowClient {
     return this.result<WorkflowOutput<W>>(id, wait);
   }
 
-  /** Instances by status, workflow name, version and parent, oldest first. At most `limit` (default 100). */
+  /** Instances by status, workflow name, version, parent and schedule, oldest first. At most `limit` (default 100). */
   async list(filter: WorkflowListFilter = {}): Promise<WorkflowInstance[]> {
     const limit = filter.limit ?? 100;
     const offset = filter.offset ?? 0;
@@ -241,6 +244,7 @@ export class WorkflowClient {
       ...(filter.workflow !== undefined ? { workflow: filter.workflow } : {}),
       ...(filter.version !== undefined ? { version: filter.version } : {}),
       ...(filter.parentId !== undefined ? { parentId: filter.parentId } : {}),
+      ...(filter.scheduleId !== undefined ? { scheduleId: filter.scheduleId } : {}),
     });
   }
 

@@ -3,7 +3,7 @@ import type { WorkflowStatus, WorkflowWait } from '../interfaces/workflow-instan
 
 /** Fields every lifecycle event carries. */
 export interface WorkflowEventBase {
-  /** Instance id. */
+  /** Instance id (a schedule's id for `schedule-skipped`). */
   id: string;
   workflow: string;
   version: number;
@@ -149,6 +149,20 @@ export interface WorkflowDeletedEvent extends WorkflowEventBase {
   status: WorkflowStatus;
 }
 
+/**
+ * Channel `nestjs:workflows:schedule-skipped`: a schedule passed over occurrences, missed while no worker was up
+ * (`reason: 'missed'`, see its `missed` option) or due while an instance it started still ran (`'overlap'`). `id`
+ * is the schedule's id, `workflow` and `version` what it starts.
+ */
+export interface WorkflowScheduleSkippedEvent extends WorkflowEventBase {
+  type: 'schedule-skipped';
+  reason: 'missed' | 'overlap';
+  /** The first occurrence it passed over (epoch milliseconds). */
+  from: number;
+  /** The last one. */
+  to: number;
+}
+
 export type WorkflowEvent =
   | WorkflowStartedEvent
   | WorkflowResumedEvent
@@ -167,4 +181,5 @@ export type WorkflowEvent =
   | WorkflowJournalLargeEvent
   | WorkflowCustomStatusEvent
   | WorkflowRetriedEvent
-  | WorkflowDeletedEvent;
+  | WorkflowDeletedEvent
+  | WorkflowScheduleSkippedEvent;

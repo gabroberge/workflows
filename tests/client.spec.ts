@@ -407,6 +407,12 @@ describe.runIf(storeKind === 'memory')('transactions on a store without the opti
     signal = this.inner.signal.bind(this.inner);
     signals = this.inner.signals.bind(this.inner);
     purge = this.inner.purge.bind(this.inner);
+    saveSchedule = this.inner.saveSchedule.bind(this.inner);
+    getSchedule = this.inner.getSchedule.bind(this.inner);
+    listSchedules = this.inner.listSchedules.bind(this.inner);
+    deleteSchedule = this.inner.deleteSchedule.bind(this.inner);
+    claimSchedules = this.inner.claimSchedules.bind(this.inner);
+    writeSchedule = this.inner.writeSchedule.bind(this.inner);
     claim = this.inner.claim.bind(this.inner);
     renew = this.inner.renew.bind(this.inner);
     write = this.inner.write.bind(this.inner);

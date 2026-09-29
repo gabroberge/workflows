@@ -63,7 +63,7 @@ interface SqlBackend {
 }
 
 const truncate = async (db: Database) => {
-  await db.execute(sql`TRUNCATE workflow_instances, workflow_journal, workflow_waits, workflow_signals, workflow_rate_limits RESTART IDENTITY`);
+  await db.execute(sql`TRUNCATE workflow_instances, workflow_journal, workflow_waits, workflow_signals, workflow_rate_limits, workflow_schedules RESTART IDENTITY`);
 };
 
 async function pgliteBackend(): Promise<SqlBackend> {
@@ -201,6 +201,24 @@ class InMemoryAppStore implements WorkflowStore {
   }
   purge(...args: Parameters<WorkflowStore['purge']>) {
     return this.db.purge(...args);
+  }
+  saveSchedule(...args: Parameters<WorkflowStore['saveSchedule']>) {
+    return this.db.saveSchedule(...args);
+  }
+  getSchedule(...args: Parameters<WorkflowStore['getSchedule']>) {
+    return this.db.getSchedule(...args);
+  }
+  listSchedules(...args: Parameters<WorkflowStore['listSchedules']>) {
+    return this.db.listSchedules(...args);
+  }
+  deleteSchedule(...args: Parameters<WorkflowStore['deleteSchedule']>) {
+    return this.db.deleteSchedule(...args);
+  }
+  claimSchedules(...args: Parameters<WorkflowStore['claimSchedules']>) {
+    return this.db.claimSchedules(...args);
+  }
+  writeSchedule(...args: Parameters<WorkflowStore['writeSchedule']>) {
+    return this.db.writeSchedule(...args);
   }
   claim(...args: Parameters<WorkflowStore['claim']>) {
     return this.db.claim(...args);

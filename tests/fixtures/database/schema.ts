@@ -30,6 +30,9 @@ export const workflowInstances = pgTable(
     rateLimitKey: text('rate_limit_key'),
     /** Lower is claimed first; 0 (none given) before every other. */
     priority: integer('priority').notNull().default(0),
+    /** The schedule that started it, and when its occurrence was due. */
+    scheduleId: text('schedule_id'),
+    scheduledAt: bigint('scheduled_at', { mode: 'number' }),
     status: text('status').$type<WorkflowStatus>().notNull(),
     input: jsonb('input'),
     output: jsonb('output'),
@@ -58,6 +61,8 @@ export const workflowInstances = pgTable(
     index('workflow_instances_leased').on(t.workflow, t.concurrencyKey).where(sql`${t.leaseUntil} IS NOT NULL`),
     // What list({ parentId }) and closing a parent's children look for.
     index('workflow_instances_parent').on(t.parentId, t.createdAt).where(sql`${t.parentId} IS NOT NULL`),
+    // What list({ scheduleId }) and a schedule's overlap check look for.
+    index('workflow_instances_schedule').on(t.scheduleId, t.createdAt).where(sql`${t.scheduleId} IS NOT NULL`),
   ],
 );
 
@@ -87,6 +92,33 @@ export const workflowWaits = pgTable(
     key: text('key'),
   },
   (t) => [primaryKey({ columns: [t.instanceId, t.position] }), index('workflow_waits_signal').on(t.signal, t.key)],
+);
+
+/** The schedules that start instances. `spec` and `state` are the engine's JSON. */
+export const workflowSchedules = pgTable(
+  'workflow_schedules',
+  {
+    id: text('id').primaryKey(),
+    workflow: text('workflow').notNull(),
+    declared: boolean('declared').notNull(),
+    spec: jsonb('spec').notNull(),
+    input: jsonb('input'),
+    paused: boolean('paused').notNull(),
+    wakeAt: bigint('wake_at', { mode: 'number' }),
+    state: jsonb('state').notNull(),
+    revision: integer('revision').notNull(),
+    leaseToken: text('lease_token'),
+    leaseOwner: text('lease_owner'),
+    leaseUntil: bigint('lease_until', { mode: 'number' }),
+    createdAt: bigint('created_at', { mode: 'number' }).notNull(),
+    updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),
+  },
+  (t) => [
+    // What claims look for: due schedules.
+    index('workflow_schedules_due').on(t.wakeAt).where(sql`${t.wakeAt} IS NOT NULL`),
+    // What listing a workflow's schedules looks for.
+    index('workflow_schedules_workflow').on(t.workflow, t.id),
+  ],
 );
 
 /**

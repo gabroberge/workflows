@@ -38,6 +38,7 @@ import type {
   WorkflowWrite,
 } from '../interfaces/workflow-store.interface.js';
 import { WorkflowRegistry } from './workflow-registry.service.js';
+import { WorkflowScheduler, type ScheduleProduction } from './workflow-scheduler.service.js';
 import { WORKFLOWS_MODULE_OPTIONS } from '../workflows.module-definition.js';
 import type { WorkflowsModuleOptions } from '../interfaces/workflows-module-options.interface.js';
 
@@ -79,12 +80,15 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
   private wake?: () => void;
   private kicked = false;
   private loop?: Promise<void>;
+  /** When the loop next starts the schedules' due occurrences (`performance.now()`): at most once a second. */
+  private schedulesAt = 0;
 
   constructor(
     private readonly storage: WorkflowStorage,
     @Inject(WORKFLOWS_MODULE_OPTIONS) options: WorkflowsModuleOptions,
     private readonly registry: WorkflowRegistry,
     private readonly events: WorkflowEvents,
+    private readonly scheduler: WorkflowScheduler,
   ) {
     const worker = options.worker === false ? { enabled: false } : (options.worker ?? {});
     const leaseMs = toMs(worker.leaseDuration ?? '30s');
@@ -179,8 +183,9 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
   async drain(options: { maxRounds?: number } = {}): Promise<number> {
     let total = 0;
     for (let round = 0; round < (options.maxRounds ?? 1_000) && !this.stopped; round++) {
+      const produced = this.produced(await this.scheduler.produce(this.id, this.deps.leaseMs));
       const executions = await this.claim(this.concurrency);
-      if (executions.length === 0) {
+      if (executions.length === 0 && produced === 0) {
         break;
       }
 
@@ -189,6 +194,14 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
     }
 
     return total;
+  }
+
+  /** After a production of the schedules' occurrences: cancels its executions of the instances it cancelled. */
+  private produced(production: ScheduleProduction): number {
+    for (const id of production.cancelled) {
+      this.noticeCancel(id);
+    }
+    return production.started;
   }
 
   /**
@@ -230,6 +243,15 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
 
   private async poll(): Promise<void> {
     while (!this.stopped) {
+      if (performance.now() >= this.schedulesAt) {
+        this.schedulesAt = performance.now() + 1_000;
+        try {
+          this.produced(await this.scheduler.produce(this.id, this.deps.leaseMs));
+        } catch (error) {
+          this.logger.error("Starting the schedules' occurrences failed.", error as Error);
+        }
+      }
+
       const free = this.concurrency - this.running.size;
       if (free > 0) {
         try {

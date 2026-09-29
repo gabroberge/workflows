@@ -4,6 +4,8 @@ import { WorkflowEvents } from './events/workflow-events.service.js';
 import { LOCK_STORAGE, WorkflowStorage } from './storage/workflow.storage.js';
 import { WorkflowClient } from './services/workflow-client.service.js';
 import { WorkflowRegistry } from './services/workflow-registry.service.js';
+import { WorkflowScheduler } from './services/workflow-scheduler.service.js';
+import { WorkflowSchedules } from './services/workflow-schedules.service.js';
 import { WorkflowWorker } from './services/workflow-worker.service.js';
 import { ConfigurableModuleClass } from './workflows.module-definition.js';
 import type { WorkflowsModuleOptions } from './interfaces/workflows-module-options.interface.js';
@@ -17,9 +19,9 @@ import type { WorkflowsModuleOptions } from './interfaces/workflows-module-optio
  */
 @Module({
   imports: [DiscoveryModule],
-  providers: [WorkflowStorage, WorkflowRegistry, WorkflowEvents, WorkflowWorker, WorkflowClient],
+  providers: [WorkflowStorage, WorkflowRegistry, WorkflowEvents, WorkflowScheduler, WorkflowWorker, WorkflowSchedules, WorkflowClient],
   // WorkflowRegistry is not public API (nor in the barrel): WorkflowsCqrsModule reads it.
-  exports: [WorkflowStorage, WorkflowClient, WorkflowWorker, WorkflowEvents, WorkflowRegistry],
+  exports: [WorkflowStorage, WorkflowClient, WorkflowSchedules, WorkflowWorker, WorkflowEvents, WorkflowRegistry],
 })
 export class WorkflowsModule extends ConfigurableModuleClass implements OnModuleInit {
   static forRoot(options: WorkflowsModuleOptions & { isGlobal?: boolean } = {}): DynamicModule {

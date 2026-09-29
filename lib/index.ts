@@ -32,8 +32,8 @@ export type {
 } from './interfaces/index.js';
 export type { Duration } from './utils/index.js';
 
-// Starting, signalling, inspecting and cancelling instances
-export { WorkflowClient } from './services/index.js';
+// Starting, signalling, inspecting and cancelling instances, and the schedules that start them
+export { WorkflowClient, WorkflowSchedules } from './services/index.js';
 export type {
   SignalWorkflowOptions,
   StartWorkflowOptions,
@@ -46,6 +46,17 @@ export type {
   WorkflowPurgeOptions,
   WorkflowResultOptions,
   WorkflowRetryInstanceOptions,
+  UpsertWorkflowScheduleOptions,
+  WorkflowSchedule,
+  WorkflowScheduleDeclaration,
+  WorkflowScheduleListFilter,
+  WorkflowScheduleMissed,
+  WorkflowScheduleOccurrence,
+  WorkflowScheduleOptions,
+  WorkflowScheduleOverlap,
+  WorkflowSchedulePreviewOptions,
+  WorkflowSchedulePreviewSpec,
+  WorkflowScheduleTiming,
   WorkflowSignalSendResult,
   WorkflowStartResult,
   WorkflowStatus,
@@ -87,6 +98,7 @@ export {
   type WorkflowJournalLargeEvent,
   type WorkflowResumedEvent,
   type WorkflowRetriedEvent,
+  type WorkflowScheduleSkippedEvent,
   type WorkflowSignalReceivedEvent,
   type WorkflowSignalTimedOutEvent,
   type WorkflowStartedEvent,
@@ -115,6 +127,11 @@ export type {
   WorkflowRateWindow,
   WorkflowRelease,
   WorkflowReopen,
+  WorkflowScheduleClaimRequest,
+  WorkflowScheduleQuery,
+  WorkflowScheduleRecord,
+  WorkflowScheduleSave,
+  WorkflowScheduleWrite,
   WorkflowSignalQuery,
   WorkflowSignalRecord,
   WorkflowSignalResult,

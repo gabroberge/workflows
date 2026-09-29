@@ -16,6 +16,11 @@ import type {
   WorkflowPurgeQuery,
   WorkflowPurgeResult,
   WorkflowReopen,
+  WorkflowScheduleClaimRequest,
+  WorkflowScheduleQuery,
+  WorkflowScheduleRecord,
+  WorkflowScheduleSave,
+  WorkflowScheduleWrite,
   WorkflowSignalQuery,
   WorkflowSignalRecord,
   WorkflowSignalResult,
@@ -57,6 +62,7 @@ export class InMemoryWorkflowStore implements WorkflowStore {
   private readonly signalLog: Array<WorkflowSignalRecord & { dedupeId: string | null }> = [];
   /** Rate-limit windows by `JSON.stringify([workflow])` or `JSON.stringify([workflow, key])`. */
   private readonly windows = new Map<string, { windowEnd: number; count: number }>();
+  private readonly schedules = new Map<string, { record: WorkflowScheduleRecord; leaseToken: string | null }>();
   private warnedAboutTransactions = false;
 
   /** `create()`, at once: it can't join `transaction` (see the class). */
@@ -99,6 +105,8 @@ export class InMemoryWorkflowStore implements WorkflowStore {
       concurrencyKey: i.concurrencyKey ?? null,
       rateLimitKey: i.rateLimitKey ?? null,
       priority: i.priority ?? 0,
+      scheduleId: i.scheduleId ?? null,
+      scheduledAt: i.scheduledAt ?? null,
       status: 'pending',
       input: copy(i.input),
       output: undefined,
@@ -142,7 +150,8 @@ export class InMemoryWorkflowStore implements WorkflowStore {
           (query.status === undefined || query.status.includes(i.status)) &&
           (query.workflow === undefined || i.workflow === query.workflow) &&
           (query.version === undefined || i.version === query.version) &&
-          (query.parentId === undefined || i.parentId === query.parentId),
+          (query.parentId === undefined || i.parentId === query.parentId) &&
+          (query.scheduleId === undefined || i.scheduleId === query.scheduleId),
       )
       .sort((a, b) => a.createdAt - b.createdAt || compare(a.id, b.id))
       .slice(query.offset, query.offset + query.limit)
@@ -265,6 +274,87 @@ export class InMemoryWorkflowStore implements WorkflowStore {
     }
 
     return { instances: finished.length, signals: prunable.size, rateLimits: ended.length };
+  }
+
+  async saveSchedule(save: WorkflowScheduleSave): Promise<WorkflowScheduleRecord | null> {
+    const existing = this.schedules.get(save.id);
+    if (save.expectRevision === null ? existing !== undefined : existing?.record.revision !== save.expectRevision) {
+      return null;
+    }
+
+    const { expectRevision: _expect, releaseLease, now, ...fields } = save;
+    const record: WorkflowScheduleRecord = {
+      ...copy(fields),
+      revision: (existing?.record.revision ?? 0) + 1,
+      leaseOwner: existing?.record.leaseOwner ?? null,
+      leaseUntil: releaseLease ? null : (existing?.record.leaseUntil ?? null),
+      createdAt: existing?.record.createdAt ?? now,
+      updatedAt: now,
+    };
+    this.schedules.set(save.id, { record, leaseToken: releaseLease ? null : (existing?.leaseToken ?? null) });
+    return copy(record);
+  }
+
+  async getSchedule(id: string): Promise<WorkflowScheduleRecord | null> {
+    const schedule = this.schedules.get(id);
+    return schedule ? copy(schedule.record) : null;
+  }
+
+  async listSchedules(query: WorkflowScheduleQuery): Promise<WorkflowScheduleRecord[]> {
+    return [...this.schedules.values()]
+      .map((schedule) => schedule.record)
+      .filter((record) => (query.workflow === undefined || record.workflow === query.workflow) && (query.declared === undefined || record.declared === query.declared))
+      .sort((a, b) => compare(a.id, b.id))
+      .slice(query.offset, query.offset + query.limit)
+      .map(copy);
+  }
+
+  async deleteSchedule(id: string, revision?: number): Promise<boolean> {
+    const schedule = this.schedules.get(id);
+    if (!schedule || (revision !== undefined && schedule.record.revision !== revision)) {
+      return false;
+    }
+    return this.schedules.delete(id);
+  }
+
+  async claimSchedules(request: WorkflowScheduleClaimRequest): Promise<WorkflowScheduleRecord[]> {
+    const workflows = new Set(request.workflows);
+    const due = [...this.schedules.values()]
+      .filter(
+        ({ record }) =>
+          !record.paused &&
+          record.wakeAt !== null &&
+          record.wakeAt <= request.now &&
+          (record.leaseUntil === null || record.leaseUntil < request.now) &&
+          workflows.has(record.workflow),
+      )
+      .sort((a, b) => a.record.wakeAt! - b.record.wakeAt! || compare(a.record.id, b.record.id))
+      .slice(0, request.limit);
+
+    for (const schedule of due) {
+      schedule.leaseToken = request.token;
+      schedule.record.leaseOwner = request.owner;
+      schedule.record.leaseUntil = request.leaseUntil;
+    }
+    return due.map((schedule) => copy(schedule.record));
+  }
+
+  async writeSchedule(id: string, token: string, write: WorkflowScheduleWrite): Promise<boolean> {
+    const schedule = this.schedules.get(id);
+    if (!schedule || schedule.leaseToken === null || schedule.leaseToken !== token) {
+      return false;
+    }
+
+    const { record } = schedule;
+    record.state = copy(write.state);
+    record.wakeAt = write.wakeAt;
+    record.revision++;
+    record.updatedAt = write.now;
+    if (write.release) {
+      schedule.leaseToken = null;
+      record.leaseUntil = null;
+    }
+    return true;
   }
 
   async claim(request: WorkflowClaimRequest): Promise<WorkflowClaim> {

@@ -8,7 +8,26 @@ import type { WorkflowStorageRegisterOptions } from '../interfaces/workflow-stor
 /** Internal: locks the registry. `WorkflowsModule.onModuleInit()` and the first read call it. */
 export const LOCK_STORAGE = Symbol('WorkflowStorage.lock');
 
-const REQUIRED = ['create', 'get', 'list', 'requestCancel', 'reopen', 'delete', 'signal', 'signals', 'purge', 'claim', 'renew', 'write'] as const;
+const REQUIRED = [
+  'create',
+  'get',
+  'list',
+  'requestCancel',
+  'reopen',
+  'delete',
+  'signal',
+  'signals',
+  'purge',
+  'saveSchedule',
+  'getSchedule',
+  'listSchedules',
+  'deleteSchedule',
+  'claimSchedules',
+  'writeSchedule',
+  'claim',
+  'renew',
+  'write',
+] as const;
 const OPTIONAL = ['createInTransaction', 'signalInTransaction'] as const;
 const DEFAULT = 'InMemoryWorkflowStore (the default: state is lost on restart and not shared between instances)';
 

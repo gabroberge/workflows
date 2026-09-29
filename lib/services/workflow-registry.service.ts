@@ -2,7 +2,7 @@ import { Injectable, type Type } from '@nestjs/common';
 import { DiscoveryService } from '@nestjs/core';
 import { WorkflowNotFoundError } from '../errors/workflow-not-found.error.js';
 import type { WorkflowRunner } from '../interfaces/workflow-runner.interface.js';
-import type { WorkflowMetadata } from '../interfaces/workflow-decorator-options.interface.js';
+import type { WorkflowDeclaredSchedule, WorkflowMetadata } from '../interfaces/workflow-decorator-options.interface.js';
 import type { WorkflowConcurrencyLimit, WorkflowRateLimitRule } from '../interfaces/workflow-store.interface.js';
 import { WORKFLOW_EVENT_ROUTES_METADATA, WORKFLOW_METADATA } from '../workflows.constants.js';
 
@@ -24,6 +24,7 @@ export const ROUTE_EVENTS = Symbol('WorkflowRegistry.routeEvents');
 @Injectable()
 export class WorkflowRegistry {
   private definitions?: Map<string, WorkflowDefinition>;
+  private declared?: Map<string, WorkflowDeclaredSchedule & { workflow: string }>;
   private eventsRouted = false;
 
   constructor(private readonly discovery: DiscoveryService) {}
@@ -57,6 +58,28 @@ export class WorkflowRegistry {
   /** The workflow names this process registers. */
   names(): string[] {
     return [...new Set([...this.load().values()].map((def) => def.name))];
+  }
+
+  /**
+   * The schedules the workflows this process runs declare, by id: each name's highest registered version's. Throws
+   * for an id two workflows declare.
+   */
+  schedules(): Map<string, WorkflowDeclaredSchedule & { workflow: string }> {
+    if (this.declared) {
+      return this.declared;
+    }
+
+    const declared = new Map<string, WorkflowDeclaredSchedule & { workflow: string }>();
+    for (const name of this.names()) {
+      for (const schedule of this.latest(name)!.schedules ?? []) {
+        const other = declared.get(schedule.id);
+        if (other) {
+          throw new Error(`Schedule "${schedule.id}" is declared by two workflows ("${other.workflow}" and "${name}"). Give each schedule its own id.`);
+        }
+        declared.set(schedule.id, { ...schedule, workflow: name });
+      }
+    }
+    return (this.declared = declared);
   }
 
   [ROUTE_EVENTS](): void {

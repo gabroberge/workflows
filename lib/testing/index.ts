@@ -5,6 +5,7 @@ import type {
   WorkflowClaim,
   WorkflowConcurrencyLimit,
   WorkflowRateLimitRule,
+  WorkflowScheduleSave,
   WorkflowStore,
   WorkflowWrite,
 } from '../interfaces/workflow-store.interface.js';
@@ -82,6 +83,8 @@ export function workflowStoreContract(
         concurrencyKey: null,
         rateLimitKey: null,
         priority: 0,
+        scheduleId: null,
+        scheduledAt: null,
         status: 'pending',
         input,
         error: null,
@@ -156,6 +159,22 @@ export function workflowStoreContract(
     equal(await children('order-1', { status: ['pending'], limit: 1, offset: 1 }), ['order-1/shipping#2'], 'a page, with other filters');
     equal(await children('order-2'), ['order-2/shipping#1'], "order-2's");
     equal(await children('order-1/shipping#1'), [], 'none');
+  });
+
+  add("create() keeps the schedule link, and list() finds a schedule's instances by scheduleId", async (t) => {
+    const scheduled = (id: string, scheduleId: string, scheduledAt: number, now: number) =>
+      t.store.create({ id, workflow: W.name, version: 1, input: null, deadline: null, scheduleId, scheduledAt, now });
+    expect(await scheduled('digest@1', 'digest', 1_000, 5), { created: true, instance: { scheduleId: 'digest', scheduledAt: 1_000 } }, 'an occurrence');
+    await scheduled('digest@2', 'digest', 2_000, 6);
+    await scheduled('report@1', 'report', 1_000, 4);
+    await t.create('manual', 3);
+    expect(await t.store.get('digest@2'), { scheduleId: 'digest', scheduledAt: 2_000 }, 'read back');
+
+    const ids = async (scheduleId: string, extra: Partial<Parameters<WorkflowStore['list']>[0]> = {}) =>
+      (await t.store.list({ limit: 100, offset: 0, scheduleId, ...extra })).map((i) => i.id);
+    equal(await ids('digest'), ['digest@1', 'digest@2'], "digest's, oldest first");
+    equal(await ids('digest', { status: ['pending'], limit: 1, offset: 1 }), ['digest@2'], 'a page, with other filters');
+    equal(await ids('none'), [], 'none');
   });
 
   // ---------------------------------------------------------------- claims and leases
@@ -787,6 +806,95 @@ export function workflowStoreContract(
     equal(await t.store.renew('done', 't3', 100), null, 'and renewal');
   });
 
+  // ---------------------------------------------------------------- schedules
+
+  add('saveSchedule() creates a schedule once, and replaces one only at the revision it read', async (t) => {
+    const input = { tenant: "O'Reilly — ü 🚀", ids: [1, null], empty: '' };
+    const created = await t.store.saveSchedule(t.schedule('s1', { input, now: 10 }));
+    expect(
+      created,
+      { id: 's1', workflow: W.name, declared: false, spec: SPEC, input, paused: false, wakeAt: 100, state: { next: 100, runs: 0 }, revision: 1, leaseOwner: null, leaseUntil: null, createdAt: 10, updatedAt: 10 },
+      'the new schedule',
+    );
+    equal(await t.store.saveSchedule(t.schedule('s1', { now: 11 })), null, 'a second insert');
+    equal(await t.store.getSchedule('s1'), created, 'getSchedule()');
+    equal(await t.store.getSchedule('missing'), null, 'an unknown id');
+
+    const replaced = await t.store.saveSchedule(t.schedule('s1', { paused: true, input: null, wakeAt: null, declared: true, now: 20, expectRevision: 1 }));
+    expect(replaced, { revision: 2, paused: true, input: null, wakeAt: null, declared: true, createdAt: 10, updatedAt: 20 }, 'replaced at revision 1');
+    equal(await t.store.saveSchedule(t.schedule('s1', { now: 21, expectRevision: 1 })), null, 'a save at a stale revision');
+    equal(await t.store.saveSchedule(t.schedule('other', { now: 21, expectRevision: 1 })), null, 'a save of an unknown id');
+    expect(await t.store.getSchedule('s1'), { revision: 2, paused: true, updatedAt: 20 }, 'unchanged by them');
+
+    const encoded = await t.store.saveSchedule(t.schedule('s2', { input: '$wf1:aes-256-gcm:k1.Zm9v' }));
+    equal(encoded?.input, '$wf1:aes-256-gcm:k1.Zm9v', 'a string input, as it is');
+  });
+
+  add('listSchedules() filters by workflow and declared, and pages by id; deleteSchedule() deletes at a revision, or any', async (t) => {
+    for (const [id, workflow, declared] of [['c', W.name, true], ['a', W.name, false], ['b', 'invoice-batch', true], ['d', W.name, false]] as const) {
+      await t.store.saveSchedule(t.schedule(id, { workflow, declared }));
+    }
+    const ids = async (query: Partial<Parameters<WorkflowStore['listSchedules']>[0]> = {}) =>
+      (await t.store.listSchedules({ limit: 100, offset: 0, ...query })).map((s) => s.id);
+    equal(await ids(), ['a', 'b', 'c', 'd'], 'every schedule, by id');
+    equal(await ids({ workflow: W.name }), ['a', 'c', 'd'], 'by workflow');
+    equal(await ids({ declared: true }), ['b', 'c'], 'the declared ones');
+    equal(await ids({ workflow: W.name, declared: false }), ['a', 'd'], 'by both');
+    equal(await ids({ workflow: W.name, limit: 1, offset: 1 }), ['c'], 'a page');
+
+    equal(await t.store.deleteSchedule('a', 2), false, 'at another revision');
+    equal(await t.store.deleteSchedule('a', 1), true, 'at its revision');
+    equal(await t.store.deleteSchedule('c'), true, 'at any revision');
+    equal(await t.store.deleteSchedule('c'), false, 'already gone');
+    equal(await ids(), ['b', 'd'], 'the rest');
+    expect(await t.store.saveSchedule(t.schedule('a')), { revision: 1 }, 'the id, free again');
+  });
+
+  add('claimSchedules() leases due, unpaused, unleased schedules of the given workflows, most overdue first', async (t) => {
+    await t.store.saveSchedule(t.schedule('late', { wakeAt: 50 }));
+    await t.store.saveSchedule(t.schedule('early', { wakeAt: 10 }));
+    await t.store.saveSchedule(t.schedule('paused', { wakeAt: 10, paused: true }));
+    await t.store.saveSchedule(t.schedule('ended', { wakeAt: null }));
+    await t.store.saveSchedule(t.schedule('future', { wakeAt: 5_000 }));
+    await t.store.saveSchedule(t.schedule('invoices', { wakeAt: 20, workflow: 'invoice-batch' }));
+    const claim = (now: number, o: { owner?: string; token?: string; workflows?: string[]; limit?: number } = {}) =>
+      t.store.claimSchedules({ owner: o.owner ?? 'w1', token: o.token ?? randomUUID(), now, leaseUntil: now + 1_000, limit: o.limit ?? 100, workflows: o.workflows ?? [W.name] });
+
+    const first = await claim(100, { token: 't1' });
+    equal(first.map((s) => s.id), ['early', 'late'], 'due and unpaused, by wakeAt');
+    expect(first[0], { leaseOwner: 'w1', leaseUntil: 1_100, revision: 1, updatedAt: 0 }, 'leased, nothing else changed');
+    equal(await claim(1_100), [], 'leased until 1100 inclusive');
+    equal((await claim(1_101, { owner: 'w2' })).map((s) => [s.id, s.leaseOwner]), [['early', 'w2'], ['late', 'w2']], 'claimed again once the lease expired');
+    equal((await claim(1_101, { workflows: ['invoice-batch', 'other'] })).map((s) => s.id), ['invoices'], 'only the given workflows');
+    equal((await claim(9_000, { limit: 1 })).map((s) => s.id), ['early'], 'at most limit');
+  });
+
+  add('writeSchedule() writes only under the lease token, and a save that releases the lease makes the token stale', async (t) => {
+    await t.store.saveSchedule(t.schedule('s', { wakeAt: 10 }));
+    const claim = (now: number, token: string) => t.store.claimSchedules({ owner: 'w1', token, now, leaseUntil: now + 1_000, limit: 10, workflows: [W.name] });
+    await claim(10, 't1');
+
+    const state = { next: 500, runs: 1, pending: [{ at: 10, cancel: [] }] };
+    equal(await t.store.writeSchedule('s', 't1', { now: 11, state, wakeAt: 11, release: false }), true, 'the lease holder');
+    expect(await t.store.getSchedule('s'), { state, wakeAt: 11, revision: 2, updatedAt: 11, leaseUntil: 1_010 }, 'written, still leased');
+    equal(await t.store.writeSchedule('s', 'other', { now: 12, state: {}, wakeAt: 0, release: true }), false, 'another token');
+    equal(await t.store.writeSchedule('missing', 't1', { now: 12, state: {}, wakeAt: 0, release: true }), false, 'an unknown id');
+
+    // A save that keeps the lease (a pause) leaves the holder its write, which keeps the save's fields.
+    const current = (await t.store.getSchedule('s'))!;
+    await t.store.saveSchedule(t.schedule('s', { paused: true, wakeAt: current.wakeAt, state: current.state, now: 13, expectRevision: current.revision }));
+    equal(await t.store.writeSchedule('s', 't1', { now: 14, state: { next: 500, runs: 1, pending: [] }, wakeAt: 500, release: true }), true, 'after a save that kept the lease');
+    expect(await t.store.getSchedule('s'), { paused: true, wakeAt: 500, revision: 4, leaseUntil: null, state: { pending: [] } }, 'released, still paused');
+    equal(await claim(600, 't2'), [], 'a paused schedule is not claimed');
+
+    await t.store.saveSchedule(t.schedule('s', { paused: false, wakeAt: 600, now: 15, expectRevision: 4 }));
+    equal((await claim(600, 't3')).map((s) => s.id), ['s'], 'resumed');
+    await t.store.saveSchedule(t.schedule('s', { wakeAt: 700, now: 16, expectRevision: 5, releaseLease: true }));
+    equal(await t.store.writeSchedule('s', 't3', { now: 17, state: {}, wakeAt: 0, release: true }), false, "the token of a lease a save released");
+    expect(await t.store.getSchedule('s'), { wakeAt: 700, leaseUntil: null, revision: 6 }, "the save's");
+    equal((await claim(700, 't4')).map((s) => s.id), ['s'], 'claimable at once');
+  });
+
   // ---------------------------------------------------------------- the application's transaction
 
   if (transaction) {
@@ -939,6 +1047,38 @@ export function workflowStoreContract(
           ),
         );
       }
+    });
+
+    add('concurrent claimSchedules() never return the same schedule twice, and saves of one revision land once', async (t) => {
+      for (let i = 0; i < 40; i++) {
+        await t.store.saveSchedule(t.schedule(`s${String(i).padStart(2, '0')}`, { wakeAt: i }));
+      }
+
+      const owners = new Map<string, string>();
+      const claimer = async (owner: string) => {
+        for (;;) {
+          const claimed = await t.store.claimSchedules({ owner, token: randomUUID(), now: 1_000, leaseUntil: FAR, limit: 3, workflows: [W.name] });
+          if (claimed.length === 0) {
+            return;
+          }
+          for (const schedule of claimed) {
+            if (owners.has(schedule.id)) {
+              throw new Error(`${schedule.id} was claimed by ${owners.get(schedule.id)} and ${owner}`);
+            }
+            owners.set(schedule.id, owner);
+          }
+          await jitter();
+        }
+      };
+      await Promise.all(['c1', 'c2', 'c3', 'c4', 'c5'].map(claimer));
+      equal(owners.size, 40, 'every schedule claimed');
+
+      const saves = await Promise.all(
+        Array.from({ length: 8 }, (_, i) => jitter().then(() => t.store.saveSchedule(t.schedule('s00', { paused: true, now: 2_000 + i, expectRevision: 1 })))),
+      );
+      equal(saves.filter((saved) => saved !== null).length, 1, 'one save at revision 1');
+      const inserts = await Promise.all(Array.from({ length: 8 }, () => jitter().then(() => t.store.saveSchedule(t.schedule('new')))));
+      equal(inserts.filter((saved) => saved !== null).length, 1, 'one insert');
     });
 
     add('a signal racing a suspension never loses the wake-up', async (t) => {
@@ -1219,6 +1359,8 @@ export function workflowStoreContract(
 
 const FAR = 9_000_000_000_000; // a deadline nobody reaches in a test
 const W = { name: 'order-fulfilment', version: 1 };
+/** A schedule's spec, as the engine stores it: JSON the store keeps as it is. */
+const SPEC = { cron: '0 0 8 * * MON', tz: 'Europe/Warsaw', startAt: null, limit: 52, missed: 'once', overlap: 'buffer-one' };
 
 class Harness {
   constructor(readonly store: WorkflowStore) {}
@@ -1249,6 +1391,24 @@ class Harness {
       ...(o.limits ? { limits: o.limits } : {}),
       ...(o.rateLimits ? { rateLimits: o.rateLimits } : {}),
     });
+  }
+
+  /** `saveSchedule()`'s argument for a schedule of `W`, due at 100, to insert unless `expectRevision` says otherwise. */
+  schedule(id: string, o: Partial<WorkflowScheduleSave> = {}): WorkflowScheduleSave {
+    return {
+      id,
+      workflow: W.name,
+      declared: false,
+      spec: SPEC,
+      input: null,
+      paused: false,
+      wakeAt: 100,
+      state: { next: 100, runs: 0, pending: [] },
+      expectRevision: null,
+      releaseLease: false,
+      now: 0,
+      ...o,
+    };
   }
 
   /** Claims at `now` and finishes what it claimed (so nothing comes back when its lease ends); returns the ids. */

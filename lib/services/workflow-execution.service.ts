@@ -311,6 +311,7 @@ export class WorkflowExecution {
       workflowId: instance.id,
       workflowName: instance.workflow,
       version: instance.version,
+      schedule: instance.scheduleId === null ? null : { id: instance.scheduleId, at: instance.scheduledAt! },
       step: (name, fn, options) => this.track(this.step(name, fn, options)),
       sleep: (name, duration) => this.track(this.sleep(name, duration)),
       waitForSignal: (name, signal, options = {}) =>

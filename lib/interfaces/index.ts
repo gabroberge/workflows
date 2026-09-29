@@ -6,6 +6,7 @@ export * from './workflow-decorator-options.interface.js';
 export * from './workflow-instance.interface.js';
 export * from './workflow-retry-options.interface.js';
 export * from './workflow-runner.interface.js';
+export * from './workflow-schedule.interface.js';
 export * from './workflow-storage.interface.js';
 export * from './workflow-store.interface.js';
 export * from './workflows-module-options.interface.js';

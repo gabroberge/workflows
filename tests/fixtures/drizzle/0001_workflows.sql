@@ -7,6 +7,8 @@ CREATE TABLE "workflow_instances" (
 	"concurrency_key" text,
 	"rate_limit_key" text,
 	"priority" integer DEFAULT 0 NOT NULL,
+	"schedule_id" text,
+	"scheduled_at" bigint,
 	"status" text NOT NULL,
 	"input" jsonb,
 	"output" jsonb,
@@ -42,6 +44,23 @@ CREATE TABLE "workflow_rate_limits" (
 	CONSTRAINT "workflow_rate_limits_workflow_key_pk" PRIMARY KEY("workflow","key")
 );
 --> statement-breakpoint
+CREATE TABLE "workflow_schedules" (
+	"id" text PRIMARY KEY NOT NULL,
+	"workflow" text NOT NULL,
+	"declared" boolean NOT NULL,
+	"spec" jsonb NOT NULL,
+	"input" jsonb,
+	"paused" boolean NOT NULL,
+	"wake_at" bigint,
+	"state" jsonb NOT NULL,
+	"revision" integer NOT NULL,
+	"lease_token" text,
+	"lease_owner" text,
+	"lease_until" bigint,
+	"created_at" bigint NOT NULL,
+	"updated_at" bigint NOT NULL
+);
+--> statement-breakpoint
 CREATE TABLE "workflow_signals" (
 	"id" bigint PRIMARY KEY GENERATED ALWAYS AS IDENTITY (sequence name "workflow_signals_id_seq" INCREMENT BY 1 MINVALUE 1 MAXVALUE 9223372036854775807 START WITH 1 CACHE 1),
 	"name" text NOT NULL,
@@ -67,6 +86,9 @@ CREATE INDEX "workflow_instances_created" ON "workflow_instances" USING btree ("
 CREATE INDEX "workflow_instances_status" ON "workflow_instances" USING btree ("status","updated_at");--> statement-breakpoint
 CREATE INDEX "workflow_instances_leased" ON "workflow_instances" USING btree ("workflow","concurrency_key") WHERE "workflow_instances"."lease_until" IS NOT NULL;--> statement-breakpoint
 CREATE INDEX "workflow_instances_parent" ON "workflow_instances" USING btree ("parent_id","created_at") WHERE "workflow_instances"."parent_id" IS NOT NULL;--> statement-breakpoint
+CREATE INDEX "workflow_instances_schedule" ON "workflow_instances" USING btree ("schedule_id","created_at") WHERE "workflow_instances"."schedule_id" IS NOT NULL;--> statement-breakpoint
 CREATE INDEX "workflow_rate_limits_end" ON "workflow_rate_limits" USING btree ("window_end");--> statement-breakpoint
+CREATE INDEX "workflow_schedules_due" ON "workflow_schedules" USING btree ("wake_at") WHERE "workflow_schedules"."wake_at" IS NOT NULL;--> statement-breakpoint
+CREATE INDEX "workflow_schedules_workflow" ON "workflow_schedules" USING btree ("workflow","id");--> statement-breakpoint
 CREATE INDEX "workflow_signals_lookup" ON "workflow_signals" USING btree ("name","key","id");--> statement-breakpoint
 CREATE INDEX "workflow_waits_signal" ON "workflow_waits" USING btree ("signal","key");

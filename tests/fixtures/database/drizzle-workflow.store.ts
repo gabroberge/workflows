@@ -14,6 +14,11 @@ import {
   type WorkflowPurgeQuery,
   type WorkflowPurgeResult,
   type WorkflowReopen,
+  type WorkflowScheduleClaimRequest,
+  type WorkflowScheduleQuery,
+  type WorkflowScheduleRecord,
+  type WorkflowScheduleSave,
+  type WorkflowScheduleWrite,
   type WorkflowSignalQuery,
   type WorkflowSignalRecord,
   type WorkflowSignalResult,
@@ -28,6 +33,7 @@ import {
   workflowInstances as instances,
   workflowJournal as journal,
   workflowRateLimits as rateLimits,
+  workflowSchedules as schedules,
   workflowSignals as signals,
   workflowWaits as waits,
 } from './schema.js';
@@ -93,6 +99,7 @@ export class DrizzleWorkflowStore implements WorkflowStore {
           query.workflow !== undefined ? eq(instances.workflow, query.workflow) : undefined,
           query.version !== undefined ? eq(instances.version, query.version) : undefined,
           query.parentId !== undefined ? eq(instances.parentId, query.parentId) : undefined,
+          query.scheduleId !== undefined ? eq(instances.scheduleId, query.scheduleId) : undefined,
         ),
       )
       .orderBy(asc(instances.createdAt), asc(instances.id))
@@ -214,6 +221,96 @@ export class DrizzleWorkflowStore implements WorkflowStore {
       .returning({ workflow: rateLimits.workflow });
 
     return { instances: purged.length, signals: pruned.length, rateLimits: windows.length };
+  }
+
+  // ---------------------------------------------------------------- schedules
+
+  async saveSchedule(save: WorkflowScheduleSave): Promise<WorkflowScheduleRecord | null> {
+    const { id, workflow, declared, spec, input, paused, wakeAt, state, now } = save;
+    const fields = { workflow, declared, spec, input, paused, wakeAt, state, updatedAt: now };
+    if (save.expectRevision === null) {
+      const [created] = await this.db.insert(schedules).values({ id, ...fields, revision: 1, createdAt: now }).onConflictDoNothing().returning();
+      return created ? toSchedule(created) : null;
+    }
+
+    // One conditional update: of two saves that read the same revision, the second finds it changed.
+    const [saved] = await this.db
+      .update(schedules)
+      .set({ ...fields, revision: sql`${schedules.revision} + 1`, ...(save.releaseLease ? { leaseToken: null, leaseUntil: null } : {}) })
+      .where(and(eq(schedules.id, id), eq(schedules.revision, save.expectRevision)))
+      .returning();
+    return saved ? toSchedule(saved) : null;
+  }
+
+  async getSchedule(id: string): Promise<WorkflowScheduleRecord | null> {
+    const [row] = await this.db.select().from(schedules).where(eq(schedules.id, id));
+    return row ? toSchedule(row) : null;
+  }
+
+  async listSchedules(query: WorkflowScheduleQuery): Promise<WorkflowScheduleRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(schedules)
+      .where(
+        and(
+          query.workflow !== undefined ? eq(schedules.workflow, query.workflow) : undefined,
+          query.declared !== undefined ? eq(schedules.declared, query.declared) : undefined,
+        ),
+      )
+      .orderBy(asc(schedules.id))
+      .limit(query.limit)
+      .offset(query.offset);
+    return rows.map(toSchedule);
+  }
+
+  async deleteSchedule(id: string, revision?: number): Promise<boolean> {
+    const deleted = await this.db
+      .delete(schedules)
+      .where(and(eq(schedules.id, id), revision !== undefined ? eq(schedules.revision, revision) : undefined))
+      .returning({ id: schedules.id });
+    return deleted.length === 1;
+  }
+
+  async claimSchedules(request: WorkflowScheduleClaimRequest): Promise<WorkflowScheduleRecord[]> {
+    const { now } = request;
+    // Locked; schedules another claim is locking right now are skipped instead of waited for.
+    const due = this.db
+      .select({ id: schedules.id })
+      .from(schedules)
+      .where(
+        and(
+          eq(schedules.paused, false),
+          isNotNull(schedules.wakeAt),
+          lte(schedules.wakeAt, now),
+          or(isNull(schedules.leaseUntil), lt(schedules.leaseUntil, now)),
+          inArray(schedules.workflow, request.workflows),
+        ),
+      )
+      .orderBy(asc(schedules.wakeAt), asc(schedules.id))
+      .limit(request.limit)
+      .for('update', { skipLocked: true });
+    const claimed = await this.db
+      .update(schedules)
+      .set({ leaseToken: request.token, leaseOwner: request.owner, leaseUntil: request.leaseUntil })
+      .where(inArray(schedules.id, due))
+      .returning();
+    claimed.sort((a, b) => a.wakeAt! - b.wakeAt! || (a.id < b.id ? -1 : 1));
+    return claimed.map(toSchedule);
+  }
+
+  async writeSchedule(id: string, token: string, write: WorkflowScheduleWrite): Promise<boolean> {
+    const written = await this.db
+      .update(schedules)
+      .set({
+        state: write.state,
+        wakeAt: write.wakeAt,
+        revision: sql`${schedules.revision} + 1`,
+        updatedAt: write.now,
+        ...(write.release ? { leaseToken: null, leaseUntil: null } : {}),
+      })
+      .where(and(eq(schedules.id, id), eq(schedules.leaseToken, token)))
+      .returning({ id: schedules.id });
+    return written.length === 1;
   }
 
   // ---------------------------------------------------------------- the worker
@@ -490,6 +587,8 @@ export class DrizzleWorkflowStore implements WorkflowStore {
         concurrencyKey: i.concurrencyKey ?? null,
         rateLimitKey: i.rateLimitKey ?? null,
         priority: i.priority ?? 0,
+        scheduleId: i.scheduleId ?? null,
+        scheduledAt: i.scheduledAt ?? null,
         status: 'pending',
         input: i.input,
         deadline: i.deadline,
@@ -573,4 +672,9 @@ function appTransaction(tx: Transaction): Transaction {
 function toInstance(row: typeof instances.$inferSelect): WorkflowInstance {
   const { leaseToken: _token, ...instance } = row;
   return instance;
+}
+
+function toSchedule(row: typeof schedules.$inferSelect): WorkflowScheduleRecord {
+  const { leaseToken: _token, ...schedule } = row;
+  return schedule;
 }

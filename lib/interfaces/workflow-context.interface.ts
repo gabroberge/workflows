@@ -5,6 +5,7 @@ import type { WorkflowInput, WorkflowOutput } from './workflow-runner.interface.
 import type { SerializedWorkflowError } from './serialized-workflow-error.interface.js';
 import type { WorkflowSignal } from '../signals/workflow.signal.js';
 import type { WorkflowRetryOptions } from './workflow-retry-options.interface.js';
+import type { WorkflowScheduleOccurrence } from './workflow-schedule.interface.js';
 
 /**
  * What a journaled value looks like after its JSON round-trip: step results,
@@ -163,6 +164,8 @@ export interface WorkflowContext {
   readonly workflowId: string;
   readonly workflowName: string;
   readonly version: number;
+  /** The schedule occurrence that started this instance (`{ id, at }`: the schedule's id and the occurrence's time), or `null`. */
+  readonly schedule: WorkflowScheduleOccurrence | null;
 
   /**
    * Runs `fn` once and journals its result; replays return the journaled

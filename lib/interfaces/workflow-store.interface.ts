@@ -19,11 +19,12 @@ import type {
  * each rule prevents. `workflowStoreContract()` from `@nestjs/workflows/testing` checks an
  * implementation against it, races included.
  *
- * Four methods need more than a plain read or write: `claim` (a lock that skips rows other
- * claims hold), `write` and `renew` (fenced by the lease token), and `signal` together with
- * `write` when it registers waits (a lock that orders them, see `signal`). `reopen` and `purge`
- * re-check their conditions on the rows they change. Everything else is safe to implement
- * naively.
+ * A few methods need more than a plain read or write: `claim` and `claimSchedules` (a lock that
+ * skips rows other claims hold; `claim` also counts limits under locks), `write`, `renew` and
+ * `writeSchedule` (fenced by the lease token), `signal` together with `write` when it registers
+ * waits (a lock that orders them, see `signal`), and `saveSchedule` (conditional on a revision).
+ * `reopen` and `purge` re-check their conditions on the rows they change. Everything else is safe
+ * to implement naively.
  */
 export interface WorkflowStore {
   // ---------------------------------------------------------------- instances
@@ -133,6 +134,36 @@ export interface WorkflowStore {
    */
   purge(query: WorkflowPurgeQuery): Promise<WorkflowPurgeResult>;
 
+  // ---------------------------------------------------------------- schedules
+
+  /**
+   * Stores a schedule, as one conditional write, and returns it as stored, or `null` when the condition fails.
+   * With `expectRevision: null`, inserts it unless a schedule with the id exists (revision 1, `createdAt = now`);
+   * with a number, replaces every field of the one whose `revision` is that number (revision + 1). Either way
+   * sets `updatedAt = now`; with `releaseLease`, clears its lease, so the worker that holds it can't
+   * `writeSchedule()` any more. Of two concurrent saves expecting the same revision, one lands.
+   */
+  saveSchedule(schedule: WorkflowScheduleSave): Promise<WorkflowScheduleRecord | null>;
+  /** The schedule, or `null` for an unknown id. */
+  getSchedule(id: string): Promise<WorkflowScheduleRecord | null>;
+  /** Schedules matching the filter, ordered by `id`; a page of them. */
+  listSchedules(query: WorkflowScheduleQuery): Promise<WorkflowScheduleRecord[]>;
+  /** Deletes the schedule (if its `revision` is still `revision`, when given), and returns whether it did. */
+  deleteSchedule(id: string, revision?: number): Promise<boolean>;
+  /**
+   * Leases up to `limit` due schedules to a worker, most overdue first (`wakeAt`, then `id`). Due: not paused,
+   * `wakeAt <= now`, no lease or an expired one (`leaseUntil < now`), and `workflow` in `workflows`. Each gets
+   * `leaseToken = token`, `leaseOwner = owner` and `leaseUntil`; nothing else changes (not `revision`). Two
+   * concurrent claims never return the same schedule: lock the candidates and skip those another claim holds.
+   */
+  claimSchedules(request: WorkflowScheduleClaimRequest): Promise<WorkflowScheduleRecord[]>;
+  /**
+   * The lease holder's write: sets `state` and `wakeAt`, `revision + 1` and `updatedAt = now`, and with `release`
+   * clears the lease (`leaseToken`, `leaseUntil`), only while `token` is the schedule's lease token; otherwise
+   * writes nothing and returns `false`. One conditional update.
+   */
+  writeSchedule(id: string, token: string, write: WorkflowScheduleWrite): Promise<boolean>;
+
   // ---------------------------------------------------------------- the worker
 
   /**
@@ -209,6 +240,10 @@ export interface NewWorkflowInstance {
   rateLimitKey?: string | null;
   /** Stored as `priority`: lower is claimed first. Absent: `0`, which goes before every other priority. */
   priority?: number;
+  /** For an instance a schedule started: the schedule's id, stored as `scheduleId`. Absent: `null`. */
+  scheduleId?: string | null;
+  /** For an instance a schedule started: the occurrence's time, stored as `scheduledAt`. Absent: `null`. */
+  scheduledAt?: number | null;
   /** The instance's `deadline`: when its run timeout passes, or `null`. Stored as is. */
   deadline: number | null;
   /**
@@ -235,6 +270,8 @@ export interface WorkflowListQuery {
   version?: number;
   /** Children of this instance. */
   parentId?: string;
+  /** Instances this schedule started. */
+  scheduleId?: string;
   limit: number;
   offset: number;
 }
@@ -402,4 +439,75 @@ export interface WorkflowRelease {
   waits: WorkflowWait[];
   /** The execution's signal cursor (`WorkflowClaim.lastSignalId`): signals above it weren't seen. */
   signalCursor: number;
+}
+
+/** A schedule as stored: `WorkflowStore.getSchedule()`, `listSchedules()` and `claimSchedules()` return it. */
+export interface WorkflowScheduleRecord {
+  id: string;
+  /** The workflow it starts (claims filter on it). */
+  workflow: string;
+  /** Declared with `@Workflow(name, { schedules })`, rather than saved with `WorkflowSchedules.upsert()`. */
+  declared: boolean;
+  /** The engine's JSON: when it runs and how. Store it as it is. */
+  spec: unknown;
+  /** The input of the instances it starts (JSON), or `null`. */
+  input: unknown;
+  paused: boolean;
+  /** When a worker next has something to do for it (`claimSchedules()` looks for `wakeAt <= now`), or `null`. */
+  wakeAt: number | null;
+  /** The engine's JSON bookkeeping. Store it as it is. */
+  state: unknown;
+  /** Bumped by every `saveSchedule()` and `writeSchedule()`. */
+  revision: number;
+  leaseOwner: string | null;
+  leaseUntil: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** What `WorkflowStore.saveSchedule()` receives. */
+export interface WorkflowScheduleSave {
+  id: string;
+  workflow: string;
+  declared: boolean;
+  spec: unknown;
+  input: unknown;
+  paused: boolean;
+  wakeAt: number | null;
+  state: unknown;
+  /** `null`: insert it, if no schedule has the id. A number: replace the one whose `revision` is still this. */
+  expectRevision: number | null;
+  /** Clear the schedule's lease (a change to when it runs: the lease holder's work is outdated). */
+  releaseLease: boolean;
+  now: number;
+}
+
+/** What `WorkflowStore.listSchedules()` receives. */
+export interface WorkflowScheduleQuery {
+  workflow?: string;
+  /** Only the declared ones (`true`), or only the others (`false`). */
+  declared?: boolean;
+  limit: number;
+  offset: number;
+}
+
+/** What `WorkflowStore.claimSchedules()` receives. */
+export interface WorkflowScheduleClaimRequest {
+  owner: string;
+  token: string;
+  now: number;
+  leaseUntil: number;
+  /** At least 1. */
+  limit: number;
+  /** The workflow names this worker runs (at least one): it starts only their schedules' instances. */
+  workflows: string[];
+}
+
+/** What `WorkflowStore.writeSchedule()` receives. */
+export interface WorkflowScheduleWrite {
+  now: number;
+  state: unknown;
+  wakeAt: number | null;
+  /** Hand the schedule back: clear its lease. */
+  release: boolean;
 }

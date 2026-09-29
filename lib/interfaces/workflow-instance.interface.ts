@@ -27,6 +27,10 @@ export interface WorkflowInstance {
   rateLimitKey: string | null;
   /** Lower is claimed first; `0` (none given) before every other. */
   priority: number;
+  /** The schedule that started it (`WorkflowSchedules`, `@Workflow(name, { schedules })`), or `null`. */
+  scheduleId: string | null;
+  /** For an instance a schedule started: when its occurrence was due (or triggered), or `null`. */
+  scheduledAt: number | null;
   status: WorkflowStatus;
   input: unknown;
   output?: unknown;

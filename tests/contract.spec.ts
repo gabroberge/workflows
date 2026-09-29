@@ -46,7 +46,7 @@ if (storeKind === 'memory') {
 // The suite itself, once: it needs no database.
 if (storeKind === 'memory') {
   describe('the contract suite', () => {
-    it("fails a store that loses a wake-up, one that skips the fence, one that ignores dedupe ids, one that drops the custom status, one that ignores terminates, ones that drop a write's signal or the parent filter, and ones that ignore concurrency limits, rate limits or priorities", async () => {
+    it("fails a store that loses a wake-up, one that skips the fence, one that ignores dedupe ids, one that drops the custom status, one that ignores terminates, ones that drop a write's signal or the parent filter, ones that ignore concurrency limits, rate limits or priorities, and ones that ignore a schedule's lease, fence or revision", async () => {
       /** Registers waits without looking for signals that arrived after the execution's cursor. */
       class NoMissedSignalCheck extends InMemoryWorkflowStore {
         override async write(...[id, token, write]: Parameters<InMemoryWorkflowStore['write']>) {
@@ -111,6 +111,33 @@ if (storeKind === 'memory') {
         }
       }
 
+      /** Claims schedules whatever their leases. */
+      class NoScheduleLease extends InMemoryWorkflowStore {
+        override async claimSchedules(...[request]: Parameters<InMemoryWorkflowStore['claimSchedules']>) {
+          const all = await this.listSchedules({ limit: 1_000, offset: 0 });
+          for (const schedule of all) {
+            await this.writeSchedule(schedule.id, (this as any).schedules.get(schedule.id).leaseToken ?? '', { now: request.now, state: schedule.state, wakeAt: schedule.wakeAt, release: true });
+          }
+          return super.claimSchedules(request);
+        }
+      }
+
+      /** Takes any token for a schedule's lease. */
+      class NoScheduleFence extends InMemoryWorkflowStore {
+        override async writeSchedule(...[id, , write]: Parameters<InMemoryWorkflowStore['writeSchedule']>) {
+          const schedule = (this as any).schedules.get(id);
+          return schedule ? super.writeSchedule(id, schedule.leaseToken ?? (schedule.leaseToken = 'any'), write) : false;
+        }
+      }
+
+      /** Saves schedules whatever their revision. */
+      class NoScheduleRevision extends InMemoryWorkflowStore {
+        override async saveSchedule(...[save]: Parameters<InMemoryWorkflowStore['saveSchedule']>) {
+          const current = await this.getSchedule(save.id);
+          return super.saveSchedule({ ...save, expectRevision: current?.revision ?? null });
+        }
+      }
+
       /** Stores every signal, dedupe id or not. */
       class NoDedupe extends InMemoryWorkflowStore {
         override async signal(...[signal]: Parameters<InMemoryWorkflowStore['signal']>) {
@@ -161,6 +188,17 @@ if (storeKind === 'memory') {
       ]);
       expect(await failures(() => new NoPriority())).toEqual([
         'claim() takes the lowest priority first (none before any), then the most overdue, with or without limits',
+      ]);
+      expect(await failures(() => new NoScheduleLease())).toEqual([
+        'claimSchedules() leases due, unpaused, unleased schedules of the given workflows, most overdue first',
+        'concurrent claimSchedules() never return the same schedule twice, and saves of one revision land once',
+      ]);
+      expect(await failures(() => new NoScheduleFence())).toEqual([
+        'writeSchedule() writes only under the lease token, and a save that releases the lease makes the token stale',
+      ]);
+      expect(await failures(() => new NoScheduleRevision())).toEqual([
+        'saveSchedule() creates a schedule once, and replaces one only at the revision it read',
+        'concurrent claimSchedules() never return the same schedule twice, and saves of one revision land once',
       ]);
       expect(await failures(() => new ExpiryFence())).toEqual(
         expect.arrayContaining(['write() changes nothing under a stale token', "a stale lease holder's writes never land, however they interleave with the new holder's"]),

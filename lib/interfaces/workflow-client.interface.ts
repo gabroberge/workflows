@@ -120,6 +120,8 @@ export interface WorkflowListFilter {
   version?: number;
   /** Only the children this instance started with `ctx.startChild()`. */
   parentId?: string;
+  /** Only the instances this schedule started. */
+  scheduleId?: string;
   /** Default 100. */
   limit?: number;
   offset?: number;

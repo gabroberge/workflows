@@ -15,6 +15,8 @@ export interface NewInstanceOptions {
   priority?: number;
   parentId?: string;
   parentClose?: WorkflowParentClose;
+  scheduleId?: string;
+  scheduledAt?: number;
 }
 
 /** What `WorkflowClient.start()` and `ctx.startChild()` ask the store to create. */
@@ -39,6 +41,8 @@ export function newInstance(workflow: WorkflowMetadata, id: unknown, input: unkn
     concurrencyKey: keyOf(workflow, json, options.caller, 'concurrency', options.concurrencyKey),
     rateLimitKey: keyOf(workflow, json, options.caller, 'rateLimit', options.rateLimitKey),
     priority: options.priority ?? 0,
+    scheduleId: options.scheduleId ?? null,
+    scheduledAt: options.scheduledAt ?? null,
     now: options.now,
   };
 }
