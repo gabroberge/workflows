@@ -8,6 +8,9 @@ export interface WorkflowStartRoute {
   event: Type<object>;
   id: (event: object) => string;
   input?: (event: object) => unknown;
+  priority?: number | ((event: object) => number | undefined);
+  concurrencyKey?: string | ((event: object) => string | undefined);
+  rateLimitKey?: string | ((event: object) => string | undefined);
 }
 
 export interface WorkflowSignalRoute {

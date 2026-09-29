@@ -197,6 +197,40 @@ describe('startup checks', () => {
         '@SignalOn(PaymentCapturedEvent): `key` must be a function of the event, such as (event) => event.orderId, or left out.',
       ),
     );
+    expect(() => StartOn(OrderPlacedEvent, { id: (event) => event.orderId, priority: 1.5 })).toThrow(
+      new TypeError('@StartOn(OrderPlacedEvent): invalid priority 1.5. Use an integer from 1 (first) to 2097151, or a function of the event.'),
+    );
+    expect(() => StartOn(OrderPlacedEvent, { id: (event) => event.orderId, concurrencyKey: '' })).toThrow(
+      new TypeError('@StartOn(OrderPlacedEvent): `concurrencyKey` must be a non-empty string, or a function of the event, such as (event) => event.warehouseId.'),
+    );
+    expect(() => StartOn(OrderPlacedEvent, { id: (event) => event.orderId, rateLimitKey: 42 as never })).toThrow(
+      new TypeError('@StartOn(OrderPlacedEvent): `rateLimitKey` must be a non-empty string, or a function of the event, such as (event) => event.warehouseId.'),
+    );
+  });
+
+  it("fails for a @StartOn() key its workflow has no limit per key to count under", async () => {
+    @Workflow('unkeyed')
+    @StartOn(OrderPlacedEvent, { id: (event) => event.orderId, concurrencyKey: 'warehouse-1' })
+    class Unkeyed {
+      async run() {}
+    }
+
+    @Workflow('unmetered', { concurrency: { limit: 1, key: () => 'k' } })
+    @StartOn(OrderPlacedEvent, { id: (event) => event.orderId, rateLimitKey: (event) => event.orderId })
+    class Unmetered {
+      async run() {}
+    }
+
+    await expectStartupError(
+      (await compile({ workflows: [Unkeyed] })).moduleRef,
+      'Unkeyed has @StartOn(OrderPlacedEvent) with a concurrencyKey, but workflow "unkeyed" has no concurrency limit per key, so the key ' +
+        'would count for nothing. Declare one with @Workflow(name, { concurrency: { limit, key } }).',
+    );
+    await expectStartupError(
+      (await compile({ workflows: [Unmetered] })).moduleRef,
+      'Unmetered has @StartOn(OrderPlacedEvent) with a rateLimitKey, but workflow "unmetered" has no rate limit per key, so the key ' +
+        'would count for nothing. Declare one with @Workflow(name, { rateLimit: { max, duration, key } }).',
+    );
   });
 });
 
@@ -351,6 +385,24 @@ describe('the publisher', () => {
     expect(await app.client.list()).toEqual([]);
     expect(await signalsSent(app.store, 'packing.paid', null)).toEqual([]);
     expect(await signalsSent(app.store, 'packing.labelled', null)).toEqual([]);
+  });
+
+  it("rejects publish() and starts nothing when a priority or key @StartOn() computes can't be used", async () => {
+    @Workflow('stock-check', { concurrency: { limit: 2, key: () => 'k' } })
+    @StartOn(OrderPlacedEvent, { id: (event) => `check-${event.orderId}`, priority: (event) => event.total / 1_000 })
+    @StartOn(OrderReadyEvent, { id: (event) => `ready-${event.orderId}`, concurrencyKey: (event) => event.orderId.length as never })
+    class StockCheck {
+      async run() {}
+    }
+
+    const app = await boot({ workflows: [StockCheck] });
+    await expect(app.eventBus.publish(new OrderPlacedEvent('o-1', 2499))).rejects.toThrow(
+      new TypeError('@StartOn(OrderPlacedEvent) on stock-check: `priority` returned 2.499. Return an integer from 1 (first) to 2097151, or undefined for none.'),
+    );
+    await expect(app.eventBus.publishAll([new OrderPlacedEvent('o-2', 3000), new OrderReadyEvent('o-2')])).rejects.toThrow(
+      new TypeError('@StartOn(OrderReadyEvent) on stock-check: `concurrencyKey` returned number, not a string. Return a non-empty string, or undefined for the computed one.'),
+    );
+    expect(await app.client.list()).toEqual([]);
   });
 
   it('starts the workflow from an aggregate’s commit(), warns once per event class, and reports failures on the UnhandledExceptionBus', async () => {

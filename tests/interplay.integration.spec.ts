@@ -241,6 +241,34 @@ class RestockOrderWorkflow {
   }
 }
 
+class StockLowEvent {
+  constructor(
+    readonly sku: string,
+    readonly supplier: string,
+    readonly urgent: boolean,
+  ) {}
+}
+
+@Workflow('purchase-order', {
+  concurrency: { limit: 1, key: (input: { supplier: string }) => input.supplier },
+  rateLimit: { max: 2, duration: '1m', key: (input: { supplier: string }) => input.supplier },
+})
+@StartOn(StockLowEvent, {
+  id: (event) => `po-${event.sku}`,
+  input: (event) => ({ sku: event.sku, supplier: event.supplier }),
+  priority: (event) => (event.urgent ? 1 : 5),
+  concurrencyKey: (event) => (event.supplier === 'acme' ? 'acme-warehouse' : undefined),
+  rateLimitKey: 'purchasing',
+})
+class PurchaseOrderWorkflow {
+  constructor(private readonly world: World) {}
+
+  async run(ctx: WorkflowContext) {
+    const id = ctx.workflowId;
+    await ctx.step('order', () => this.world.record('purchase', id));
+  }
+}
+
 @Workflow('refund-process')
 class RefundProcessWorkflow {
   async run(ctx: WorkflowContext, input: { orderId: string; amount: number }) {
@@ -605,6 +633,30 @@ describe('@StartOn() and a concurrency key', () => {
     await running;
     expect(await b.worker.drain()).toBe(1);
     expect(recorded('order')).toEqual(['restock-feather-wand', 'restock-salmon-kibble-2kg', 'restock-clumping-litter-10l']);
+  });
+});
+
+describe('@StartOn() with a priority and keys', () => {
+  it('starts instances with the priority and keys it takes, fixed or from the event, in the process that publishes', async () => {
+    const api = await start([PurchaseOrderWorkflow], { cqrs: true });
+    const worker = await start([PurchaseOrderWorkflow], { cqrs: true, worker: { concurrency: 1 } });
+    const eventBus = api.moduleRef.get(EventBus);
+    await eventBus.publish(new StockLowEvent('salmon-kibble-2kg', 'acme', false));
+    await eventBus.publish(new StockLowEvent('clumping-litter-10l', 'globex', true));
+    await eventBus.publish(new StockLowEvent('feather-wand', 'initech', false));
+
+    expect((await api.client.list()).map(({ id, priority, concurrencyKey, rateLimitKey }) => ({ id, priority, concurrencyKey, rateLimitKey }))).toEqual([
+      { id: 'po-clumping-litter-10l', priority: 1, concurrencyKey: 'globex', rateLimitKey: 'purchasing' },
+      { id: 'po-feather-wand', priority: 5, concurrencyKey: 'initech', rateLimitKey: 'purchasing' },
+      { id: 'po-salmon-kibble-2kg', priority: 5, concurrencyKey: 'acme-warehouse', rateLimitKey: 'purchasing' },
+    ]);
+
+    // The urgent one first; all three share one window of two, the key every event gives.
+    await worker.worker.drain();
+    expect(recorded('purchase')).toEqual(['po-clumping-litter-10l', 'po-feather-wand']);
+    clock.advance('1m');
+    await worker.worker.drain();
+    expect(recorded('purchase')).toEqual(['po-clumping-litter-10l', 'po-feather-wand', 'po-salmon-kibble-2kg']);
   });
 });
 

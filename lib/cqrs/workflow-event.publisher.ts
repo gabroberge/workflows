@@ -2,6 +2,7 @@ import { Injectable, Logger, type OnApplicationBootstrap, type OnModuleInit } fr
 import { EventBus, UnhandledExceptionBus, type AsyncContext, type IEvent, type IEventPublisher } from '@nestjs/cqrs';
 import { WorkflowClient } from '../services/workflow-client.service.js';
 import { canonical } from '../utils/canonical.util.js';
+import { MAX_PRIORITY } from '../utils/new-instance.util.js';
 import { normalize } from '../utils/normalize.util.js';
 import { ROUTE_EVENTS, WorkflowRegistry } from '../services/workflow-registry.service.js';
 import type { WorkflowDispatcherContext } from './interfaces/workflow-dispatcher-context.interface.js';
@@ -157,10 +158,16 @@ export class WorkflowEventPublisher implements IEventPublisher, OnModuleInit, On
         continue;
       }
 
-      for (const { workflow, route } of targets.starts) {
+      for (const { workflow, name, route } of targets.starts) {
         const id = route.id(event);
         const input = route.input ? route.input(event) : event;
-        writes.push({ event, run: (transaction) => this.workflowClient.start(workflow, input, { id, transaction }) });
+        const priority = startOption(event, name, 'priority', route.priority);
+        const concurrencyKey = startOption(event, name, 'concurrencyKey', route.concurrencyKey);
+        const rateLimitKey = startOption(event, name, 'rateLimitKey', route.rateLimitKey);
+        writes.push({
+          event,
+          run: (transaction) => this.workflowClient.start(workflow, input, { id, transaction, priority, concurrencyKey, rateLimitKey }),
+        });
       }
 
       // A signal reaches every instance waiting with its name and key, whatever the workflow:
@@ -245,6 +252,34 @@ export class WorkflowEventPublisher implements IEventPublisher, OnModuleInit, On
   private table(): Map<Function, WorkflowEventTargets> {
     return (this.routes ??= this.explorer.explore());
   }
+}
+
+/**
+ * A `@StartOn()` option for the event: the value it was given, or what its function returns, checked here, before
+ * anything is written, rather than by `start()` once earlier writes of the same publish have landed.
+ */
+function startOption<T extends number | string>(
+  event: object,
+  workflow: string,
+  option: 'priority' | 'concurrencyKey' | 'rateLimitKey',
+  given: T | ((event: object) => T | undefined) | undefined,
+): T | undefined {
+  const value: unknown = typeof given === 'function' ? given(event) : given;
+  if (value === undefined) {
+    return undefined;
+  }
+
+  const where = `@StartOn(${event.constructor.name}) on ${workflow}: \`${option}\` returned`;
+  if (option === 'priority') {
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0 || value > MAX_PRIORITY) {
+      throw new TypeError(`${where} ${JSON.stringify(value)}. Return an integer from 1 (first) to ${MAX_PRIORITY}, or undefined for none.`);
+    }
+  } else if (typeof value !== 'string' || value.length === 0) {
+    throw new TypeError(
+      `${where} ${value === '' ? 'an empty string' : `${typeof value}, not a string`}. Return a non-empty string, or undefined for the computed one.`,
+    );
+  }
+  return value as T;
 }
 
 /** A key may be empty (it matches waits for ''), an id may not (WorkflowClient.signal() refuses it). */

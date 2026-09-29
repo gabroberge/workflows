@@ -1,6 +1,6 @@
 import { Injectable, type Type } from '@nestjs/common';
 import { DiscoveryService } from '@nestjs/core';
-import { WorkflowRegistry } from '../services/workflow-registry.service.js';
+import { WorkflowRegistry, type WorkflowDefinition } from '../services/workflow-registry.service.js';
 import { WORKFLOW_METADATA } from '../workflows.constants.js';
 import type {
   WorkflowEventRoute,
@@ -49,6 +49,7 @@ export class WorkflowEventsExplorer {
         if (route.kind === 'signal') {
           targetsOf(route.event).signals.push({ workflow: definition.type, name, route });
         } else if (latest) {
+          assertStartKeys(definition, route);
           targetsOf(route.event).starts.push({ workflow: definition.type, name, route });
         }
       }
@@ -68,6 +69,22 @@ export class WorkflowEventsExplorer {
             'put them on the @Workflow() class.',
         );
       }
+    }
+  }
+}
+
+/** A key `@StartOn()` gives an instance would count for nothing, and fail every start, without a limit per key. */
+function assertStartKeys(definition: WorkflowDefinition, route: WorkflowStartRoute): void {
+  const limits = [
+    { option: 'concurrencyKey', perKey: definition.concurrency?.perKey, what: 'concurrency limit', declare: '{ concurrency: { limit, key } }' },
+    { option: 'rateLimitKey', perKey: definition.rateLimit?.perKey, what: 'rate limit', declare: '{ rateLimit: { max, duration, key } }' },
+  ] as const;
+  for (const { option, perKey, what, declare } of limits) {
+    if (route[option] !== undefined && perKey == null) {
+      throw new Error(
+        `${definition.type.name} has @StartOn(${route.event.name}) with a ${option}, but workflow "${definition.name}" has no ${what} per ` +
+          `key, so the key would count for nothing. Declare one with @Workflow(name, ${declare}).`,
+      );
     }
   }
 }
