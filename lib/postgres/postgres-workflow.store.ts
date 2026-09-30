@@ -738,7 +738,7 @@ RETURNING cancel_requested::text AS cancel_requested, terminate_requested::text 
       return Promise.resolve();
     }
 
-    this.readiness ??= (this.migrateOnStartup ? this.migrate().then(() => undefined) : assertMigrated(this.executor, this.schema, MIGRATIONS)).then(
+    this.readiness ??= this.prepare().then(
       () => {
         this.ready = true;
       },
@@ -750,6 +750,15 @@ RETURNING cancel_requested::text AS cancel_requested, terminate_requested::text 
     return this.readiness;
   }
 
+  private async prepare(): Promise<void> {
+    await assertReadCommitted(this.executor);
+    if (this.migrateOnStartup) {
+      await this.migrate();
+    } else {
+      await assertMigrated(this.executor, this.schema, MIGRATIONS);
+    }
+  }
+
   /**
    * In the application's transaction, a store not known to be ready checks its schema through that transaction: a
    * statement outside it could wait for it (PGlite, and a pool of one, have one connection).
@@ -759,6 +768,7 @@ RETURNING cancel_requested::text AS cancel_requested, terminate_requested::text 
       return;
     }
 
+    await assertReadCommitted(tx);
     await assertMigrated(
       tx,
       this.schema,
@@ -892,6 +902,22 @@ ON CONFLICT (instance_id, name) DO UPDATE SET entry = excluded.entry`,
   private async lastSignalId(db: SqlTransaction): Promise<number> {
     const [row] = await db.query<Row>(`SELECT coalesce(max(id), 0)::text AS id FROM ${this.t.signals}`);
     return toInt(row?.id) ?? 0;
+  }
+}
+
+/**
+ * The store's statements outside its transactions (a cancel's update, a claim, an insert-or-ignore) race each other.
+ * READ COMMITTED, PostgreSQL's default, has one that meets a row another changed meanwhile wait for it and look again;
+ * under REPEATABLE READ or SERIALIZABLE it would fail with a serialization error instead.
+ */
+async function assertReadCommitted(db: SqlTransaction): Promise<void> {
+  const [row] = await db.query<Row>("SELECT current_setting('default_transaction_isolation') AS isolation");
+  if (row?.isolation !== 'read committed') {
+    throw new Error(
+      `PostgresWorkflowStore needs the database's default transaction isolation to be READ COMMITTED (PostgreSQL's default), not ${row?.isolation}: ` +
+        'its statements race each other, and would fail with serialization errors. Set default_transaction_isolation back for the database, ' +
+        "or for the store's connections (a pool of their own).",
+    );
   }
 }
 

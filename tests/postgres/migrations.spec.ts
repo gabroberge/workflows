@@ -243,6 +243,17 @@ describe('options', () => {
     expect(await tables('m_production')).toContain('instances');
   });
 
+  it("refuse connections whose default isolation isn't READ COMMITTED, before migrating (its races would fail)", async () => {
+    const serializable = new pg.Pool({ connectionString: database!.url, max: 1, options: '-c default_transaction_isolation=serializable' });
+    pools.push(serializable);
+    const store = new PostgresWorkflowStore({ executor: fromPg(serializable), schema: 'm_isolation' });
+    await expect(store.onModuleInit()).rejects.toThrow(
+      "PostgresWorkflowStore needs the database's default transaction isolation to be READ COMMITTED (PostgreSQL's default), not serializable: its statements race each other",
+    );
+    await expect(store.get('any')).rejects.toThrow('not serializable');
+    expect(await tables('m_isolation')).toEqual([]);
+  });
+
   it('take a schema name of letters, digits and underscores, quoted in every statement', async () => {
     for (const schema of ['bad-name', '1st', '', 'x'.repeat(64), 'a"b', 'a$1']) {
       expect(() => new PostgresWorkflowStore({ executor: fromPg(pool()), schema })).toThrow(TypeError);
