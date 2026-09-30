@@ -117,6 +117,9 @@ describe('the clients each executor takes', () => {
       await client.query('BEGIN');
       expect(await executor.wrapTransaction(client).query('SELECT 1::text AS one')).toEqual([{ one: '1' }]);
       await client.query('SELECT 1 / 0').catch(() => undefined);
+      // pg rejects a query at its error, before the ReadyForQuery that carries the transaction's state; it sends the
+      // next statement only after that one arrived.
+      await client.query('SELECT 1').catch(() => undefined);
       expect(() => executor.wrapTransaction(client)).toThrow('The node-postgres client is in a failed transaction: roll it back.');
       await client.query('ROLLBACK');
     } finally {
