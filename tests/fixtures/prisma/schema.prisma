@@ -1,0 +1,16 @@
+generator client {
+  provider = "prisma-client"
+  output   = "./generated"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+/// The application's table: tests/postgres writes it in the transactions that start and signal workflows.
+model Order {
+  id     String @id
+  status String
+
+  @@map("orders")
+}
