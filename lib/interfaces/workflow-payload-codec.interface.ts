@@ -1,8 +1,10 @@
+import type { PayloadCodec, PayloadContext } from '../core/interfaces/payload-codec.interface.js';
+
 /**
  * Where a payload is stored, which the codec receives with it, the same to encode and to decode: a codec that
  * authenticates it (`AesGcmPayloadCodec` does) refuses a payload moved to another instance, entry or field.
  */
-export interface WorkflowPayloadContext {
+export interface WorkflowPayloadContext extends PayloadContext {
   /**
    * The field that holds it: of an instance (`input`, `output`, `error`, `customStatus`, `cancelReason`), of one of
    * its journal entries (`result`, `progress`, `error`, `data`), of a signal (`payload`), or of a schedule (`input`).
@@ -25,21 +27,7 @@ export interface WorkflowPayloadContext {
  * statuses and times stay as they are: the store matches on them. `WorkflowsModule.forRoot({ codec })` takes one
  * (an instance, or a class Nest creates with its dependencies), or several: the first encodes, and each payload is
  * decoded by the codec whose `id` it was stored with, so a codec you replace keeps decoding what it encoded.
- * Payloads stored before any codec was set are read as they are.
+ * Payloads stored before any codec was set are read as they are. A `PayloadCodec` of `@nestjs/workflows/core` whose
+ * methods take any context (`AesGcmPayloadCodec`) is one.
  */
-export interface WorkflowPayloadCodec {
-  /**
-   * Stored with every payload the codec encodes, to pick the codec that decodes it: letters, digits, `.`, `_` and
-   * `-`, such as `'aes-256-gcm'`. Keep it when you change the codec's options; change it with a codec that can't
-   * read what this one wrote.
-   */
-  readonly id: string;
-  /**
-   * `value` as a string (it is JSON-safe: what `JSON.parse(JSON.stringify(...))` gives). Synchronous where it can
-   * be: an asynchronous codec delays `start()` and `signal()` with `{ transaction }` past their first await, which a
-   * driver whose transactions run synchronously can't take.
-   */
-  encode(value: unknown, context: WorkflowPayloadContext): string | Promise<string>;
-  /** The value `encode()` got (or a promise of it), from what it returned. Throw if `data` isn't what it encoded for `context`. */
-  decode(data: string, context: WorkflowPayloadContext): unknown;
-}
+export interface WorkflowPayloadCodec extends PayloadCodec<WorkflowPayloadContext> {}

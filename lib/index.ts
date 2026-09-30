@@ -142,7 +142,7 @@ export type {
 export * from './stores/index.js';
 
 // Payloads: encode (encrypt, compress) what the store keeps, with `WorkflowsModule.forRoot({ codec })`
-export { AesGcmPayloadCodec, type AesGcmPayloadCodecOptions } from './codecs/index.js';
+export { AesGcmPayloadCodec, type AesGcmPayloadCodecOptions } from './core/codecs/index.js';
 export type { WorkflowPayloadCodec, WorkflowPayloadContext } from './interfaces/index.js';
 
 // Testing: a clock that only moves when told to, and `WorkflowWorker.drain()` to run due

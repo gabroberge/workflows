@@ -1,10 +1,11 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { InMemoryWorkflowStore } from '../stores/in-memory-workflow.store.js';
-import type { WorkflowPayloadCodec } from '../interfaces/workflow-payload-codec.interface.js';
+import type { WorkflowPayloadCodec, WorkflowPayloadContext } from '../interfaces/workflow-payload-codec.interface.js';
 import type { WorkflowStore } from '../interfaces/workflow-store.interface.js';
 import { WORKFLOWS_MODULE_OPTIONS } from '../workflows.module-definition.js';
 import { WORKFLOW_PAYLOAD_CODECS } from '../workflows.constants.js';
-import { EncodedWorkflowStore, PayloadCodecs } from './encoded-workflow.store.js';
+import { EncodedWorkflowStore } from './encoded-workflow.store.js';
+import { PayloadCodecs } from '../core/codecs/payload-codecs.js';
 import type { WorkflowsModuleOptions } from '../interfaces/workflows-module-options.interface.js';
 import type { WorkflowStorageRegisterOptions } from '../interfaces/workflow-storage.interface.js';
 
@@ -63,13 +64,13 @@ export class WorkflowStorage {
   private registered?: WorkflowStore;
   private active?: WorkflowStore;
   private engine?: EncodedWorkflowStore;
-  private readonly codecs: PayloadCodecs;
+  private readonly codecs: PayloadCodecs<WorkflowPayloadContext>;
 
   constructor(
     @Optional() @Inject(WORKFLOWS_MODULE_OPTIONS) private readonly options?: WorkflowsModuleOptions,
     @Optional() @Inject(WORKFLOW_PAYLOAD_CODECS) codecs?: WorkflowPayloadCodec[],
   ) {
-    this.codecs = new PayloadCodecs(codecs ?? []);
+    this.codecs = new PayloadCodecs(codecs ?? [], { name: "WorkflowsModule's codec", type: 'WorkflowPayloadCodec' });
   }
 
   /**

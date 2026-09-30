@@ -1,8 +1,15 @@
 import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from 'node:crypto';
 import { deflateRawSync, inflateRawSync } from 'node:zlib';
-import type { WorkflowPayloadCodec, WorkflowPayloadContext } from '../interfaces/workflow-payload-codec.interface.js';
+import type { PayloadCodec, PayloadContext } from '../interfaces/payload-codec.interface.js';
+import { describePlace, otherPlaces, WORKFLOW_PLACES } from '../utils/payload-place.util.js';
 
-/** What `AesGcmPayloadCodec` takes. */
+/**
+ * What `AesGcmPayloadCodec` takes.
+ *
+ * ```ts
+ * const options: AesGcmPayloadCodecOptions = { keys: { '2026-09': process.env.PAYLOADS_KEY! }, current: '2026-09' };
+ * ```
+ */
 export interface AesGcmPayloadCodecOptions {
   /**
    * The keys by id (letters, digits, `_` and `-`): 32 random bytes each (AES-256), as a `Buffer` or `Uint8Array`,
@@ -25,9 +32,9 @@ const DEFLATED = 1;
 /**
  * Encrypts payloads with AES-256-GCM (`node:crypto`), under a key derived for each payload from the configured one
  * (HKDF-SHA256 with a random salt) and a random IV, so no key nears the 2^32 encryptions random IVs allow, and with
- * the payload's context as additional authenticated data, so a payload that was changed, or moved to another
- * instance, journal entry or field, fails to decrypt instead of being read. The key's id is stored with each
- * payload, so rotating keys needs no migration: payloads are decrypted with the key that encrypted them, and
+ * the payload's context as additional authenticated data, so a payload that was changed, or moved to another place
+ * (another instance, journal entry, job or field), fails to decrypt instead of being read. The key's id is stored with
+ * each payload, so rotating keys needs no migration: payloads are decrypted with the key that encrypted them, and
  * written with the current one. Payloads of 1 KiB or more are deflated first. Its `id` is `'aes-256-gcm'`.
  *
  * ```ts
@@ -36,7 +43,7 @@ const DEFLATED = 1;
  * })
  * ```
  */
-export class AesGcmPayloadCodec implements WorkflowPayloadCodec {
+export class AesGcmPayloadCodec implements PayloadCodec {
   readonly id = 'aes-256-gcm';
   private readonly keys = new Map<string, Buffer>();
   private readonly current: string;
@@ -65,7 +72,7 @@ export class AesGcmPayloadCodec implements WorkflowPayloadCodec {
     this.threshold = compress === false ? Infinity : compress;
   }
 
-  encode(value: unknown, context: WorkflowPayloadContext): string {
+  encode(value: unknown, context: PayloadContext): string {
     const json = Buffer.from(JSON.stringify(value), 'utf8');
     const deflated = json.length >= this.threshold;
     const plaintext = Buffer.concat([Buffer.of(deflated ? DEFLATED : 0), deflated ? deflateRawSync(json) : json]);
@@ -77,13 +84,13 @@ export class AesGcmPayloadCodec implements WorkflowPayloadCodec {
     return `${this.current}.${Buffer.concat([header, ciphertext, cipher.getAuthTag()]).toString('base64url')}`;
   }
 
-  decode(data: string, context: WorkflowPayloadContext): unknown {
+  decode(data: string, context: PayloadContext): unknown {
     const dot = data.indexOf('.');
     const id = data.slice(0, dot);
     const key = this.keys.get(id);
     if (dot < 0 || !key) {
       throw new Error(
-        `AesGcmPayloadCodec: a payload of ${describe(context)} was encrypted with key ${JSON.stringify(id)}, which isn't in keys. ` +
+        `AesGcmPayloadCodec: a payload of ${describePlace(context)} was encrypted with key ${JSON.stringify(id)}, which isn't in keys. ` +
           'Keep a key in keys while payloads it encrypted may still be read.',
       );
     }
@@ -96,7 +103,7 @@ export class AesGcmPayloadCodec implements WorkflowPayloadCodec {
       decipher.setAuthTag(bytes.subarray(bytes.length - TAG_BYTES));
       plaintext = Buffer.concat([decipher.update(bytes.subarray(HEADER_BYTES, bytes.length - TAG_BYTES)), decipher.final()]);
     } catch {
-      throw new Error(`AesGcmPayloadCodec: a payload of ${describe(context)} failed authentication: it was changed, or encrypted for another place.`);
+      throw new Error(`AesGcmPayloadCodec: a payload of ${describePlace(context)} failed authentication: it was changed, or encrypted for another place.`);
     }
 
     const body = plaintext.subarray(1);
@@ -137,18 +144,13 @@ function derived(key: Buffer, bytes: Buffer): Buffer {
   return Buffer.from(hkdfSync('sha256', key, bytes.subarray(0, SALT_BYTES), 'nestjs-workflows payload', 32));
 }
 
-/** The additional authenticated data: the key's id and where the payload is stored. */
-function associated(key: string, context: WorkflowPayloadContext): Buffer {
-  return Buffer.from(JSON.stringify([key, context.field, context.instanceId ?? null, context.entry ?? null, context.signal ?? null, context.schedule ?? null]), 'utf8');
-}
-
-function describe(context: WorkflowPayloadContext): string {
-  const where = context.entry !== undefined
-    ? `entry "${context.entry}" of instance "${context.instanceId}"`
-    : context.instanceId !== undefined
-      ? `instance "${context.instanceId}"`
-      : context.signal !== undefined
-        ? `signal "${context.signal}"`
-        : `schedule "${context.schedule}"`;
-  return `${where} (${context.field})`;
+/**
+ * The additional authenticated data: the key's id, then the context: its `field` and workflows' places (`null` where
+ * absent) first, in the order this codec was built with, so what it encrypted then still decrypts, then any other
+ * key, by name, with its value.
+ */
+function associated(key: string, context: PayloadContext): Buffer {
+  const places = WORKFLOW_PLACES.map((place) => context[place] ?? null);
+  const others = otherPlaces(context).flatMap((place) => [place, context[place]!]);
+  return Buffer.from(JSON.stringify([key, context.field, ...places, ...others]), 'utf8');
 }
