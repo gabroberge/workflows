@@ -1,3 +1,4 @@
+import type { ConcurrencyLimit, RateLimit, RateWindow, ResolvedConcurrency, ResolvedRateLimit } from '../core/interfaces/limits.interface.js';
 import type { Duration } from '../core/time/duration.js';
 import type { ScheduleSpec } from '../utils/schedule-spec.util.js';
 import type { WorkflowScheduleDeclaration } from './workflow-schedule.interface.js';
@@ -24,33 +25,16 @@ export interface WorkflowDeclaredSchedule {
 }
 
 /** `@Workflow(name, { concurrency })`, validated. */
-export interface WorkflowConcurrencyMetadata {
-  /** At most this many instances of the workflow hold a slot, or `null`. */
-  limit: number | null;
-  /** At most this many per concurrency key, or `null`. */
-  perKey: number | null;
-  /** The key of an instance, from its input. */
-  key?: (input: any) => string | null | undefined;
-}
+export type WorkflowConcurrencyMetadata = ResolvedConcurrency;
 
 /** `@Workflow(name, { rateLimit })`, validated. */
-export interface WorkflowRateLimitMetadata {
-  /** The workflow's own window, or `null`. */
-  limit: WorkflowRateWindow | null;
-  /** Each key's window, or `null`. */
-  perKey: WorkflowRateWindow | null;
-  /** The key of an instance, from its input. */
-  key?: (input: any) => string | null | undefined;
-}
+export type WorkflowRateLimitMetadata = ResolvedRateLimit;
 
 /** At most `max` executions start per window of `duration` milliseconds. */
-export interface WorkflowRateWindow {
-  max: number;
-  duration: number;
-}
+export type WorkflowRateWindow = RateWindow;
 
 /** One limit of `@Workflow(name, { concurrency })`. */
-export interface WorkflowConcurrency {
+export interface WorkflowConcurrency extends ConcurrencyLimit {
   /** A positive integer: how many instances may run at once, of the workflow, or with `key`, per key. */
   limit: number;
   /**
@@ -62,7 +46,7 @@ export interface WorkflowConcurrency {
 }
 
 /** One limit of `@Workflow(name, { rateLimit })`. */
-export interface WorkflowRateLimit {
+export interface WorkflowRateLimit extends RateLimit {
   /** A positive integer: how many executions may start per `duration`, of the workflow, or with `key`, per key. */
   max: number;
   /** The window, such as `'1m'`. */

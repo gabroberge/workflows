@@ -2,6 +2,7 @@ import { WorkflowIdConflictError } from '../errors/workflow-id-conflict.error.js
 import type { WorkflowMetadata } from '../interfaces/workflow-decorator-options.interface.js';
 import type { WorkflowInstance, WorkflowParentClose } from '../interfaces/workflow-instance.interface.js';
 import type { NewWorkflowInstance } from '../interfaces/workflow-store.interface.js';
+import { assertPriority } from '../core/limits/limits.js';
 import { canonical } from './canonical.util.js';
 import type { Duration } from '../core/time/duration.js';
 import { runTimeoutMs } from './run-timeout.util.js';
@@ -25,8 +26,8 @@ export function newInstance(workflow: WorkflowMetadata, id: unknown, input: unkn
   if (typeof id !== 'string' || id.length === 0) {
     throw new TypeError(`Invalid workflow instance id ${JSON.stringify(id)}. Use a non-empty string, such as \`order-\${orderId}\`.`);
   }
-  if (options.priority !== undefined && (!Number.isSafeInteger(options.priority) || options.priority < 0 || options.priority > MAX_PRIORITY)) {
-    throw new TypeError(`${options.caller}: invalid priority ${JSON.stringify(options.priority)}. Use an integer from 1 (first) to ${MAX_PRIORITY}.`);
+  if (options.priority !== undefined) {
+    assertPriority(options.priority, options.caller);
   }
 
   const json = normalize(input);
@@ -47,9 +48,6 @@ export function newInstance(workflow: WorkflowMetadata, id: unknown, input: unkn
     now: options.now,
   };
 }
-
-/** BullMQ's highest priority, which the queue design shares: priorities read alike across the family. */
-export const MAX_PRIORITY = 2_097_151;
 
 const LIMITS = {
   concurrency: { option: 'concurrencyKey', limit: 'concurrency limit', key: 'concurrency key', declare: '{ concurrency: { limit, key } }' },

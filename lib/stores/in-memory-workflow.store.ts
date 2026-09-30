@@ -1,4 +1,6 @@
 import { Logger } from '@nestjs/common';
+import type { RateWindowState } from '../core/interfaces/limits.interface.js';
+import { rateWindowRoom, takeRateWindow } from '../core/limits/limits.js';
 import type {
   WorkflowInstance,
   WorkflowJournalEntry,
@@ -61,7 +63,7 @@ export class InMemoryWorkflowStore implements WorkflowStore {
   private readonly rows = new Map<string, Row>();
   private readonly signalLog: Array<WorkflowSignalRecord & { dedupeId: string | null }> = [];
   /** Rate-limit windows by `JSON.stringify([workflow])` or `JSON.stringify([workflow, key])`. */
-  private readonly windows = new Map<string, { windowEnd: number; count: number }>();
+  private readonly windows = new Map<string, RateWindowState>();
   private readonly schedules = new Map<string, { record: WorkflowScheduleRecord; leaseToken: string | null }>();
   private warnedAboutTransactions = false;
 
@@ -413,15 +415,15 @@ export class InMemoryWorkflowStore implements WorkflowStore {
     }
 
     const heldBy = (key: string) => held.get(key) ?? 0;
-    const usedBy = (key: string) => this.openWindow(key, request.now)?.count ?? 0;
+    const roomIn = (key: string, max: number) => rateWindowRoom(this.windows.get(key), max, request.now);
     const free = (i: WorkflowInstance) => {
       const limit = limits.get(i.workflow);
       const rule = rules.get(i.workflow);
       return {
         total: limit?.limit != null ? limit.limit - heldBy(slot(i.workflow)) : Infinity,
         key: limit?.perKey != null && i.concurrencyKey !== null ? limit.perKey - heldBy(slot(i.workflow, i.concurrencyKey)) : Infinity,
-        rate: rule?.limit ? rule.limit.max - usedBy(slot(i.workflow)) : Infinity,
-        rateKey: rule?.perKey && i.rateLimitKey !== null ? rule.perKey.max - usedBy(slot(i.workflow, i.rateLimitKey)) : Infinity,
+        rate: rule?.limit ? roomIn(slot(i.workflow), rule.limit.max) : Infinity,
+        rateKey: rule?.perKey && i.rateLimitKey !== null ? roomIn(slot(i.workflow, i.rateLimitKey), rule.perKey.max) : Infinity,
       };
     };
 
@@ -446,20 +448,9 @@ export class InMemoryWorkflowStore implements WorkflowStore {
         ...(rule?.perKey && i.rateLimitKey !== null ? [{ key: slot(i.workflow, i.rateLimitKey), duration: rule.perKey.duration }] : []),
       ];
       for (const { key, duration } of windows) {
-        const window = this.openWindow(key, request.now);
-        if (window) {
-          window.count++;
-        } else {
-          this.windows.set(key, { windowEnd: request.now + duration, count: 1 });
-        }
+        this.windows.set(key, takeRateWindow(this.windows.get(key), duration, request.now));
       }
     }
-  }
-
-  /** The window under `key` if it is still open at `now`. */
-  private openWindow(key: string, now: number): { windowEnd: number; count: number } | undefined {
-    const window = this.windows.get(key);
-    return window && window.windowEnd > now ? window : undefined;
   }
 
   async renew(id: string, token: string, leaseUntil: number): Promise<{ cancelRequested: boolean; terminateRequested: boolean } | null> {

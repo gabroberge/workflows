@@ -1,6 +1,6 @@
 import type { Type } from '@nestjs/common';
 import type { WorkflowRunner } from '../../interfaces/workflow-runner.interface.js';
-import { MAX_PRIORITY } from '../../utils/new-instance.util.js';
+import { isPriority, MAX_PRIORITY } from '../../core/limits/limits.js';
 import type { StartOnOptions } from '../interfaces/start-on-options.interface.js';
 import type { WorkflowStartRoute } from '../interfaces/workflow-event-route.interface.js';
 import { addEventRoute, assertEventClass, assertMapper } from '../utils/event-routes.util.js';
@@ -48,7 +48,7 @@ function assertPriority(event: Type<object>, priority: unknown): void {
     return;
   }
 
-  if (typeof priority !== 'number' || !Number.isSafeInteger(priority) || priority < 0 || priority > MAX_PRIORITY) {
+  if (!isPriority(priority)) {
     throw new TypeError(
       `@StartOn(${event.name}): invalid priority ${JSON.stringify(priority)}. Use an integer from 1 (first) to ${MAX_PRIORITY}, or a function of the event.`,
     );

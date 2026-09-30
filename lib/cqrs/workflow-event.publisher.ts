@@ -2,7 +2,7 @@ import { Injectable, Logger, type OnApplicationBootstrap, type OnModuleInit } fr
 import { EventBus, UnhandledExceptionBus, type AsyncContext, type IEvent, type IEventPublisher } from '@nestjs/cqrs';
 import { WorkflowClient } from '../services/workflow-client.service.js';
 import { canonical } from '../utils/canonical.util.js';
-import { MAX_PRIORITY } from '../utils/new-instance.util.js';
+import { isPriority, MAX_PRIORITY } from '../core/limits/limits.js';
 import { normalize } from '../utils/normalize.util.js';
 import { ROUTE_EVENTS, WorkflowRegistry } from '../services/workflow-registry.service.js';
 import type { WorkflowDispatcherContext } from './interfaces/workflow-dispatcher-context.interface.js';
@@ -271,7 +271,7 @@ function startOption<T extends number | string>(
 
   const where = `@StartOn(${event.constructor.name}) on ${workflow}: \`${option}\` returned`;
   if (option === 'priority') {
-    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0 || value > MAX_PRIORITY) {
+    if (!isPriority(value)) {
       throw new TypeError(`${where} ${JSON.stringify(value)}. Return an integer from 1 (first) to ${MAX_PRIORITY}, or undefined for none.`);
     }
   } else if (typeof value !== 'string' || value.length === 0) {

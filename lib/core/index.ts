@@ -13,3 +13,7 @@ export type { BackoffSettings, ResolvedBackoff, ResolvedRetry, RetrySettings } f
 // Payloads: codecs, the AES-GCM one, and the family's envelope that stores what they encode
 export { AesGcmPayloadCodec, isEncodedPayload, PayloadCodecs, type AesGcmPayloadCodecOptions, type PayloadCodecsOptions } from './codecs/index.js';
 export type { PayloadCodec, PayloadContext, SerializedError } from './interfaces/index.js';
+
+// Limits: concurrency and rate limits, priorities, and rate-limit window arithmetic (the claims themselves are a store's)
+export { assertPriority, MAX_PRIORITY, rateWindowRoom, resolveConcurrency, resolveRateLimit, takeRateWindow } from './limits/index.js';
+export type { ConcurrencyLimit, RateLimit, RateWindow, RateWindowState, ResolvedConcurrency, ResolvedRateLimit } from './interfaces/index.js';

@@ -7,7 +7,7 @@ import type {
 import { canonical } from './canonical.util.js';
 import { cronOccurrences, parseCron, type CronExpression } from './cron.util.js';
 import { parseDuration } from '../core/time/duration.js';
-import { MAX_PRIORITY } from './new-instance.util.js';
+import { assertPriority } from '../core/limits/limits.js';
 import { parseRRule, rruleCounts, rruleOccurrences, type RRule } from './rrule.util.js';
 import { assertTimeZone } from './time-zone.util.js';
 
@@ -118,9 +118,7 @@ export function scheduleSpec(
     );
   }
   const priority = options.priority ?? 0;
-  if (!Number.isSafeInteger(priority) || priority < 0 || priority > MAX_PRIORITY) {
-    throw new TypeError(`${owner}: invalid priority ${JSON.stringify(priority)}. Use an integer from 1 (first) to ${MAX_PRIORITY}.`);
-  }
+  assertPriority(priority, owner);
 
   return { ...timing, tz, startAt, endAt, limit, missed, overlap, priority, ...extra };
 }
