@@ -17,7 +17,13 @@ const PLAIN: PayloadCodec = {
   decode: (data) => JSON.parse(data),
 };
 
-/** What `PayloadCodecs` names in its errors. */
+/**
+ * What `PayloadCodecs` names in its errors.
+ *
+ * ```ts
+ * new PayloadCodecs(codecs, { name: "QueuesModule's codec", type: 'QueuePayloadCodec' });
+ * ```
+ */
 export interface PayloadCodecsOptions {
   /** The option the codecs come from, such as `"WorkflowsModule's codec"`. Default `"the module's codec"`. */
   name?: string;

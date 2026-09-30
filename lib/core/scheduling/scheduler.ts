@@ -37,6 +37,12 @@ interface DeclaredSpec extends ScheduleSpec {
 /**
  * A schedule's fields, as `Scheduler.save()`'s change returns them: what `ScheduleStore.saveSchedule()` takes, without
  * the condition.
+ *
+ * ```ts
+ * await scheduler.save(id, (current): ScheduleFields | null =>
+ *   current?.declared ? null : scheduler.changed(current, { target: 'emails', declared: false, spec, payload }),
+ * );
+ * ```
  */
 export type ScheduleFields = Omit<ScheduleSave, 'id' | 'expectRevision' | 'now'>;
 
