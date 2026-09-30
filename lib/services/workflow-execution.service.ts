@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { Logger, type Type } from '@nestjs/common';
 import { createHash, randomUUID } from 'node:crypto';
 import { setImmediate as nextMacrotask } from 'node:timers/promises';
+import type { LeasedRun } from '../core/interfaces/leased-worker-options.interface.js';
 import type { WorkflowClock } from '../interfaces/workflow-clock.interface.js';
 import { parseDuration, type Duration } from '../core/time/duration.js';
 import { WorkflowNonDeterminismError } from '../errors/workflow-non-determinism.error.js';
@@ -89,7 +90,6 @@ export interface ExecutionDeps {
   clock: WorkflowClock;
   events: WorkflowEvents;
   defaultRetry: ResolvedRetry;
-  leaseMs: number;
   journalLimits: Required<WorkflowJournalLimits>;
 }
 
@@ -249,7 +249,6 @@ export class WorkflowExecution {
   leaseLost = false;
   storeError: unknown = null;
   shuttingDown = false;
-  detached = false;
   cancelRequested = false;
   /** A terminate was requested: stop compensating too. */
   terminateRequested = false;
@@ -289,8 +288,17 @@ export class WorkflowExecution {
     /** Highest signal id visible to this execution's waits. */
     readonly signalCursor: number,
     private readonly deps: ExecutionDeps,
+    /** The worker's run of this instance: its lease, renewed on a heartbeat, and a signal for a lost lease or a shutdown. */
+    private readonly lease: LeasedRun,
     replayOnly: boolean,
   ) {
+    const stop = () => (lease.leaseLost ? this.loseLease() : this.requestShutdown());
+    if (lease.signal.aborted) {
+      stop();
+    } else {
+      lease.signal.addEventListener('abort', stop, { once: true });
+    }
+
     this.mode = replayOnly ? 'replay' : 'run';
     this.journal = new Map(journal.map((entry) => [entry.name, entry]));
     for (const entry of journal) {
@@ -377,36 +385,20 @@ export class WorkflowExecution {
     this.abort.abort(new WorkflowInterrupt('shutdown'));
   }
 
-  /** After a shutdown timeout: never touch the store again. */
-  detach(): void {
-    this.detached = true;
-    this.requestShutdown();
+  /** Past the shutdown timeout, the worker stopped waiting for it: never touch the store again. */
+  get detached(): boolean {
+    return this.lease.detached;
   }
 
-  /** Extends the lease; called by the engine's heartbeat and by `WorkflowStepContext.heartbeat()`. */
+  /**
+   * Extends the lease, for `WorkflowStepContext.heartbeat()` (the worker renews it on its own heartbeat too). The
+   * worker hands the execution the cancel and terminate requests the renewal reads.
+   */
   async renew(): Promise<void> {
     if (this.detached || this.leaseLost) {
       return;
     }
-
-    let result: { cancelRequested: boolean; terminateRequested: boolean } | null;
-    try {
-      result = await this.deps.store.renew(
-        this.instance.id,
-        this.instance.leaseToken,
-        this.deps.clock.now() + this.deps.leaseMs,
-      );
-    } catch {
-      return; // transient; the next heartbeat tries again before the lease runs out
-    }
-
-    if (!result) {
-      this.loseLease();
-      return;
-    }
-
-    this.cancelRequested ||= result.cancelRequested;
-    this.terminateRequested ||= result.terminateRequested;
+    await this.lease.renew();
   }
 
   /** Runs registered compensations in reverse order, each as a journaled, retried step. */
@@ -1334,6 +1326,7 @@ export class WorkflowExecution {
     }
     this.leaseLost = true;
     this.abort.abort(new WorkflowInterrupt('lease-lost'));
+    this.lease.loseLease();
   }
 
   private abortInterrupt(): WorkflowInterrupt {

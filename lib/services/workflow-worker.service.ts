@@ -1,5 +1,3 @@
-import { randomUUID } from 'node:crypto';
-import { hostname } from 'node:os';
 import {
   Inject,
   Injectable,
@@ -9,8 +7,9 @@ import {
   type OnModuleDestroy,
 } from '@nestjs/common';
 import { systemClock } from '../core/time/clock.js';
+import type { LeasedRun, LeaseRequest } from '../core/interfaces/leased-worker-options.interface.js';
+import { LeasedWorker } from '../core/workers/leased-worker.js';
 import type { WorkflowClock } from '../interfaces/workflow-clock.interface.js';
-import { parseDuration } from '../core/time/duration.js';
 import { WorkflowNonDeterminismError } from '../errors/workflow-non-determinism.error.js';
 import { isWorkflowInterrupt } from '../errors/workflow-interrupt.error.js';
 import { serializeError } from '../utils/serialize-error.util.js';
@@ -43,10 +42,11 @@ import { WorkflowScheduler, type ScheduleProduction } from './workflow-scheduler
 import { WORKFLOWS_MODULE_OPTIONS } from '../workflows.module-definition.js';
 import type { WorkflowsModuleOptions } from '../interfaces/workflows-module-options.interface.js';
 
-interface Running {
+/** A claimed instance, with the execution that runs it once its journal is read. */
+interface Claimed {
+  instance: ClaimedWorkflowInstance;
+  signalCursor: number;
   exec?: WorkflowExecution;
-  done?: Promise<void>;
-  stopHeartbeat: () => void;
 }
 
 type EventBody = WorkflowEvent extends infer E
@@ -68,21 +68,8 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
   private readonly clock: WorkflowClock;
   private readonly deps: ExecutionDeps;
   private readonly enabled: boolean;
-  private readonly concurrency: number;
-  private readonly pollInterval: number;
-  private readonly heartbeatInterval: number;
-  private readonly shutdownTimeout: number;
-  private readonly running = new Set<Running>();
-  /** Claims in flight: shutdown waits for them, so nothing they claim starts unobserved. */
-  private readonly claiming = new Set<Promise<unknown>>();
-  private stopped = false;
-  private stop!: () => void;
-  private readonly stoppedPromise = new Promise<void>((resolve) => (this.stop = resolve));
-  private wake?: () => void;
-  private kicked = false;
-  private loop?: Promise<void>;
-  /** When the loop next starts the schedules' due occurrences (`performance.now()`): at most once a second. */
-  private schedulesAt = 0;
+  /** The claim-execute loop: polling, concurrency, lease renewals, the drain at shutdown. */
+  private readonly leased: LeasedWorker<Claimed>;
 
   constructor(
     private readonly storage: WorkflowStorage,
@@ -92,25 +79,27 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
     private readonly scheduler: WorkflowScheduler,
   ) {
     const worker = options.worker === false ? { enabled: false } : (options.worker ?? {});
-    const leaseMs = parseDuration(worker.leaseDuration ?? '30s');
 
     this.clock = options.clock ?? systemClock;
     this.enabled = worker.enabled ?? true;
-    this.id = worker.id ?? `${hostname()}:${process.pid}:${randomUUID().slice(0, 8)}`;
-    this.concurrency = worker.concurrency ?? 10;
-    this.pollInterval = parseDuration(worker.pollInterval ?? '1s');
-    this.heartbeatInterval = parseDuration(worker.heartbeatInterval ?? Math.floor(leaseMs / 3));
-    this.shutdownTimeout = parseDuration(worker.shutdownTimeout ?? '10s');
-
-    if (!Number.isInteger(this.concurrency) || this.concurrency < 1) {
-      throw new TypeError(`worker.concurrency (${this.concurrency}) must be a positive integer.`);
-    }
-    if (this.pollInterval <= 0 || this.heartbeatInterval <= 0) {
-      throw new TypeError('worker.pollInterval and worker.heartbeatInterval must be positive, such as "1s".');
-    }
-    if (this.heartbeatInterval >= leaseMs) {
-      throw new TypeError(`worker.heartbeatInterval (${this.heartbeatInterval}ms) must be shorter than worker.leaseDuration (${leaseMs}ms).`);
-    }
+    this.leased = new LeasedWorker<Claimed>({
+      name: 'worker',
+      owner: worker.id,
+      concurrency: worker.concurrency,
+      pollInterval: worker.pollInterval,
+      leaseDuration: worker.leaseDuration,
+      heartbeatInterval: worker.heartbeatInterval,
+      shutdownTimeout: worker.shutdownTimeout,
+      clock: this.clock,
+      // Schedules have second precision: their occurrences are started at most once a second, however often it polls.
+      produceInterval: '1s',
+      produce: async () => this.produced(await this.scheduler.produce(this.id, this.leased.leaseMs)),
+      claim: (lease, limit) => this.claim(lease, limit),
+      renew: (claimed, until) => this.renew(claimed, until),
+      execute: (claimed, run) => this.execute(claimed, run),
+      onError: (error, stage) => this.logger.error(FAILED[stage], error as Error),
+    });
+    this.id = this.leased.owner;
 
     this.deps = {
       get store() {
@@ -128,7 +117,6 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
       },
       clock: this.clock,
       events,
-      leaseMs,
       defaultRetry: resolveRetry(options.retry),
       journalLimits: resolveJournalLimits(options.journal),
     };
@@ -137,7 +125,7 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
   onApplicationBootstrap() {
     this.registry.keys(); // validate definitions at startup
     if (this.enabled) {
-      this.loop = this.poll();
+      this.leased.start();
     }
   }
 
@@ -157,8 +145,7 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
 
   /** @internal Look for work now instead of at the next poll (after a local start or signal). */
   kick(): void {
-    this.kicked = true;
-    this.wake?.();
+    this.leased.kick();
   }
 
   /**
@@ -167,10 +154,10 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
    * instead of when its next heartbeat reads the flag.
    */
   noticeCancel(id: string, terminate = false): void {
-    for (const running of this.running) {
-      if (running.exec?.instance.id === id) {
-        running.exec.cancelRequested = true;
-        running.exec.terminateRequested ||= terminate;
+    for (const { exec } of this.leased.running) {
+      if (exec?.instance.id === id) {
+        exec.cancelRequested = true;
+        exec.terminateRequested ||= terminate;
       }
     }
     this.kick();
@@ -181,20 +168,8 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
    * limits let start. Returns the number of executions. For tests (with a `ManualWorkflowClock` and
    * `worker: false`), scripts and cron-driven workers.
    */
-  async drain(options: { maxRounds?: number } = {}): Promise<number> {
-    let total = 0;
-    for (let round = 0; round < (options.maxRounds ?? 1_000) && !this.stopped; round++) {
-      const produced = this.produced(await this.scheduler.produce(this.id, this.deps.leaseMs));
-      const executions = await this.claim(this.concurrency);
-      if (executions.length === 0 && produced === 0) {
-        break;
-      }
-
-      total += executions.length;
-      await Promise.race([Promise.all(executions), this.stoppedPromise]);
-    }
-
-    return total;
+  drain(options: { maxRounds?: number } = {}): Promise<number> {
+    return this.leased.drain(options);
   }
 
   /** After a production of the schedules' occurrences: cancels its executions of the instances it cancelled. */
@@ -211,126 +186,44 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
    * `shutdownTimeout`. Executions that stopped are handed back at once; the
    * rest keep their lease until it expires, because their step may still be running.
    */
-  async shutdown(): Promise<void> {
-    if (this.stopped) {
-      return;
-    }
-
-    this.stopped = true;
-    this.stop();
-    this.wake?.();
-
-    // Instances claimed by a claim that was in flight start now (and are told to
-    // stop at once), so they are handed back before the store closes.
-    await Promise.allSettled(this.claiming);
-    for (const running of this.running) {
-      running.exec?.requestShutdown();
-    }
-
-    let timer: NodeJS.Timeout | undefined;
-    await Promise.race([
-      Promise.allSettled([...this.running].map((running) => running.done)),
-      new Promise((resolve) => (timer = setTimeout(resolve, this.shutdownTimeout))),
-    ]);
-    clearTimeout(timer);
-
-    for (const running of this.running) {
-      running.stopHeartbeat();
-      running.exec?.detach();
-    }
-
-    await this.loop;
+  shutdown(): Promise<void> {
+    return this.leased.shutdown();
   }
 
-  private async poll(): Promise<void> {
-    while (!this.stopped) {
-      if (performance.now() >= this.schedulesAt) {
-        this.schedulesAt = performance.now() + 1_000;
-        try {
-          this.produced(await this.scheduler.produce(this.id, this.deps.leaseMs));
-        } catch (error) {
-          this.logger.error("Starting the schedules' occurrences failed.", error as Error);
-        }
-      }
-
-      const free = this.concurrency - this.running.size;
-      if (free > 0) {
-        try {
-          const executions = await this.claim(free);
-          for (const execution of executions) {
-            void execution.finally(() => this.kick());
-          }
-        } catch (error) {
-          this.logger.error('Claiming workflow instances failed.', error as Error);
-        }
-      }
-
-      await this.idle();
-    }
-  }
-
-  private idle(): Promise<void> {
-    if (this.kicked || this.stopped) {
-      this.kicked = false;
-      return Promise.resolve();
-    }
-
-    return new Promise((resolve) => {
-      const done = () => {
-        clearTimeout(timer);
-        this.wake = undefined;
-        resolve();
-      };
-      const timer = setTimeout(done, this.pollInterval);
-      this.wake = () => {
-        this.kicked = false;
-        done();
-      };
-    });
-  }
-
-  /** Claims due instances and starts executing them (before any caller sees them). */
-  private async claim(limit: number): Promise<Promise<void>[]> {
+  /** Leases due instances of the workflow versions this process runs, under their limits. */
+  private async claim(lease: LeaseRequest, limit: number): Promise<Claimed[]> {
     const workflows = this.registry.versions();
-    if (workflows.length === 0 || limit <= 0) {
+    if (workflows.length === 0) {
       return [];
     }
 
-    const now = this.clock.now();
-    const token = randomUUID();
-    const claim = this.store.claim({
-      owner: this.id,
-      token,
-      now,
-      leaseUntil: now + this.deps.leaseMs,
+    const { instances, lastSignalId } = await this.store.claim({
+      owner: lease.owner,
+      token: lease.token,
+      now: lease.now,
+      leaseUntil: lease.until,
       limit,
       workflows,
       limits: this.registry.limits(),
       rateLimits: this.registry.rateLimits(),
     });
-    this.claiming.add(claim);
+    return instances.map((instance) => ({ instance: { ...instance, leaseToken: lease.token }, signalCursor: lastSignalId }));
+  }
 
-    try {
-      const { instances, lastSignalId } = await claim;
-      return instances.map((instance) => this.start({ ...instance, leaseToken: token }, lastSignalId));
-    } finally {
-      this.claiming.delete(claim);
+  /** Extends an instance's lease, and hands its execution the cancel and terminate requests the renewal read. */
+  private async renew(claimed: Claimed, until: number): Promise<boolean> {
+    const { instance, exec } = claimed;
+    const flags = await this.store.renew(instance.id, instance.leaseToken, until);
+    if (flags && exec) {
+      exec.cancelRequested ||= flags.cancelRequested;
+      exec.terminateRequested ||= flags.terminateRequested;
     }
+    return flags !== null;
   }
 
-  private start(instance: ClaimedWorkflowInstance, signalCursor: number): Promise<void> {
-    const running: Running = { stopHeartbeat: () => undefined };
-    this.running.add(running);
-    const done = this.execute(instance, signalCursor, running).finally(() => this.running.delete(running));
-    running.done = done;
-    return done;
-  }
-
-  private async execute(instance: ClaimedWorkflowInstance, signalCursor: number, running: Running): Promise<void> {
+  private async execute(claimed: Claimed, run: LeasedRun): Promise<void> {
+    const { instance, signalCursor } = claimed;
     const definition = this.registry.get(instance.workflow, instance.version)!;
-    const heartbeat = setInterval(() => void running.exec?.renew(), this.heartbeatInterval);
-    heartbeat.unref();
-    running.stopHeartbeat = () => clearInterval(heartbeat);
 
     try {
       const details = await this.claimed(instance, signalCursor);
@@ -339,11 +232,8 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
       }
 
       const replayOnly = instance.status === 'compensating' || instance.cancelRequested;
-      const exec = new WorkflowExecution(instance, details.journal ?? [], signalCursor, this.deps, replayOnly);
-      running.exec = exec;
-      if (this.stopped) {
-        exec.requestShutdown();
-      }
+      const exec = new WorkflowExecution(instance, details.journal ?? [], signalCursor, this.deps, run, replayOnly);
+      claimed.exec = exec;
       // Nothing of it runs any more, not even its compensations.
       if (instance.terminateRequested) {
         return await this.terminate(exec, instance);
@@ -357,8 +247,6 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
         `Executing "${instance.id}" (${instance.workflow}@${instance.version}) failed; it is retried when its lease expires.`,
         error as Error,
       );
-    } finally {
-      clearInterval(heartbeat);
     }
   }
 
@@ -649,6 +537,13 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
     } as WorkflowEvent);
   }
 }
+
+/** What the loop logs when a stage fails; it carries on. */
+const FAILED: Record<'claim' | 'produce' | 'execute', string> = {
+  claim: 'Claiming workflow instances failed.',
+  produce: "Starting the schedules' occurrences failed.",
+  execute: 'Executing a workflow instance failed.',
+};
 
 function cancelled(reason: string | null): SerializedWorkflowError {
   return { name: 'WorkflowCancelledError', message: reason ?? 'Cancelled.' };

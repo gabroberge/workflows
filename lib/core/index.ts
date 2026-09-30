@@ -21,3 +21,7 @@ export type { ConcurrencyLimit, RateLimit, RateWindow, RateWindowState, Resolved
 // Results: waiting for an outcome, settled at once by this process or read from the store with a backoff
 export { ResultWaiter } from './results/index.js';
 export type { ResultOutcome, ResultWaiterOptions, ResultWaitOptions } from './interfaces/index.js';
+
+// Workers: a claim-execute loop under leases, renewed on a heartbeat, drained at shutdown
+export { LeasedWorker } from './workers/index.js';
+export type { LeasedRun, LeasedWorkerOptions, LeaseRequest } from './interfaces/index.js';
