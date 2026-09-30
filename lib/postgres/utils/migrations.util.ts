@@ -30,11 +30,17 @@ export function migrationStatements(schema: string, migrations: readonly StoreMi
     );
   }
 
-  const statements = from === 0 && to > 0 ? [createSchemaStatement(s), `CREATE TABLE IF NOT EXISTS ${s}.migrations (
+  const statements: string[] = [];
+  if (from === 0 && to > 0) {
+    statements.push(
+      createSchemaStatement(s),
+      `CREATE TABLE IF NOT EXISTS ${s}.migrations (
   version integer PRIMARY KEY,
   name text NOT NULL,
   applied_at timestamptz NOT NULL DEFAULT now()
-)`] : [];
+)`,
+    );
+  }
   for (const migration of migrations.filter((m) => m.version > from && m.version <= to)) {
     statements.push(...migration.up(s), `INSERT INTO ${s}.migrations (version, name) VALUES (${migration.version}, '${migration.name}')`);
   }

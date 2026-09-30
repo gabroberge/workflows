@@ -47,13 +47,13 @@ class KyselyExecutor implements SqlExecutor {
 
   async transaction<T>(work: (transaction: SqlTransaction) => Promise<T>, options: SqlTransactionOptions = {}): Promise<T> {
     const builder = this.db.transaction();
-    const run = (trx: KyselyLike) => work(kyselyTransaction(trx));
+    const inTransaction = (trx: KyselyLike) => work(kyselyTransaction(trx));
     if (!options.isolationLevel) {
-      return builder.execute(run);
+      return builder.execute(inTransaction);
     }
 
     isolationSql(options.isolationLevel);
-    return builder.setIsolationLevel(options.isolationLevel).execute(run);
+    return builder.setIsolationLevel(options.isolationLevel).execute(inTransaction);
   }
 
   wrapTransaction(transaction: unknown): SqlTransaction {

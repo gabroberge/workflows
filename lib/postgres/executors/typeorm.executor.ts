@@ -66,8 +66,8 @@ class TypeOrmExecutor implements SqlExecutor {
   }
 
   async transaction<T>(work: (transaction: SqlTransaction) => Promise<T>, options: SqlTransactionOptions = {}): Promise<T> {
-    const run = (manager: TypeOrmEntityManagerLike) => work(runnerTransaction(manager.queryRunner!));
-    return options.isolationLevel ? this.dataSource.transaction(isolationSql(options.isolationLevel), run) : this.dataSource.transaction(run);
+    const inTransaction = (manager: TypeOrmEntityManagerLike) => work(runnerTransaction(manager.queryRunner!));
+    return options.isolationLevel ? this.dataSource.transaction(isolationSql(options.isolationLevel), inTransaction) : this.dataSource.transaction(inTransaction);
   }
 
   wrapTransaction(transaction: unknown): SqlTransaction {
@@ -75,7 +75,7 @@ class TypeOrmExecutor implements SqlExecutor {
     if (!runner?.isTransactionActive) {
       throw new TypeError(
         isEntityManager(transaction) || isQueryRunner(transaction)
-          ? 'Pass the EntityManager your dataSource.transaction() callback receives (or a QueryRunner after startTransaction()), not dataSource.manager: it runs each statement outside your transaction.'
+          ? 'Pass the EntityManager your dataSource.transaction() callback receives (or a QueryRunner after startTransaction()), not dataSource.manager or a runner outside a transaction: each statement would commit on its own.'
           : `Pass the EntityManager your TypeORM dataSource.transaction() callback receives, got ${describeValue(transaction)}.`,
       );
     }
