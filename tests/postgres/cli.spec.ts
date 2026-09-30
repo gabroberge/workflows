@@ -1,16 +1,18 @@
 /**
- * The `nest-workflows` command (lib/postgres/cli.ts): `sql` prints what migrationSql() does, `migrate` applies the
- * migrations, `status` exits with 1 while the schema is behind, and every misuse says what to do instead.
+ * The `nest-workflows` command (lib/postgres/cli.ts: the kit's runStoreCli() on PostgresWorkflowStore's schema): `sql`
+ * prints what migrationSql() does, `migrate` applies the migrations, `status` exits with 1 while the schema is behind,
+ * and every misuse says what to do instead, in workflows' words.
  */
+import { runStoreCli, type StoreCliIo } from '@nestjs/store-kit';
 import { PostgresWorkflowStore } from '../../lib/postgres/index.js';
-import { runCli } from '../../lib/postgres/utils/cli.util.js';
+import { workflowStoreSchema } from '../../lib/postgres/migrations/index.js';
 import { testDatabase } from './support.js';
 
 const { database, reason } = await testDatabase('pgstore_cli');
 
-async function run(argv: string[], env: Record<string, string | undefined> = {}) {
+async function run(argv: string[], env: StoreCliIo['env'] = {}) {
   const output = { out: '', err: '' };
-  const code = await runCli(argv, { out: (text) => (output.out += text), err: (text) => (output.err += text), env });
+  const code = await runStoreCli([workflowStoreSchema], argv, { out: (text) => (output.out += text), err: (text) => (output.err += text), env });
   return { code, ...output };
 }
 

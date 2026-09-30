@@ -1,4 +1,4 @@
-import type { SqlExecutor } from './sql-executor.interface.js';
+import type { SqlExecutor } from '@nestjs/store-kit/postgres';
 
 /** What `new PostgresWorkflowStore(options, storage)` takes. */
 export interface PostgresWorkflowStoreOptions {

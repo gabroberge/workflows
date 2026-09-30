@@ -1,4 +1,19 @@
 import { Logger, type OnModuleInit } from '@nestjs/common';
+import {
+  advisoryLock,
+  assertReadCommittedTransaction,
+  columns,
+  quoteSchema,
+  SqlParams,
+  toBool,
+  toInt,
+  toJson,
+  toText,
+  type SqlExecutor,
+  type SqlTransaction,
+  type SqlTransactionOptions,
+  type StoreReadiness,
+} from '@nestjs/store-kit/postgres';
 import type { SerializedWorkflowError } from '../interfaces/serialized-workflow-error.interface.js';
 import type { WorkflowInstance, WorkflowJournalEntry, WorkflowParentClose, WorkflowStatus } from '../interfaces/workflow-instance.interface.js';
 import type {
@@ -25,13 +40,7 @@ import type {
 } from '../interfaces/workflow-store.interface.js';
 import type { WorkflowStorage } from '../storage/workflow.storage.js';
 import type { PostgresWorkflowStoreOptions } from './interfaces/postgres-workflow-store-options.interface.js';
-import type { SqlExecutor, SqlTransaction, SqlTransactionOptions } from './interfaces/sql-executor.interface.js';
-import { MIGRATIONS } from './migrations/index.js';
-import { hasMethod } from './utils/executor.util.js';
-import { applyMigrations, assertMigrated, latestVersion, migrationScript } from './utils/migrations.util.js';
-import { quoteSchema, SqlParams, toBool, toInt, toJson, toText } from './utils/sql.util.js';
-
-const DEFAULT_SCHEMA = 'nest_workflows';
+import { workflowStoreSchema } from './migrations/index.js';
 
 /** A statement that waited for a lock sees what the lock's holder committed. */
 const READ_COMMITTED: SqlTransactionOptions = { isolationLevel: 'read committed' };
@@ -105,16 +114,15 @@ export class PostgresWorkflowStore implements WorkflowStore, OnModuleInit {
    * privilege on the database even when the schema exists: drop that statement if someone created the schema for you.
    */
   static migrationSql(options: { schema?: string; from?: number; to?: number } = {}): string {
-    return migrationScript(options.schema ?? DEFAULT_SCHEMA, MIGRATIONS, options);
+    return workflowStoreSchema.sql(options);
   }
 
   /** The schema version this version of the package needs: its last migration. */
-  static readonly schemaVersion = latestVersion(MIGRATIONS);
+  static readonly schemaVersion = workflowStoreSchema.latest;
 
   private readonly logger = new Logger('WorkflowsModule');
   private readonly executor: SqlExecutor;
   private readonly schema: string;
-  private readonly migrateOnStartup: boolean;
   private readonly t: Record<'instances' | 'journal' | 'waits' | 'signals' | 'schedules' | 'rateLimits', string>;
   /**
    * Serializes signals with each other (exclusive) and with suspensions that register waits (shared), until the
@@ -122,23 +130,14 @@ export class PostgresWorkflowStore implements WorkflowStore, OnModuleInit {
    * missed signals and its commit.
    */
   private readonly signalLock: string;
-  private readiness?: Promise<void>;
-  private ready = false;
+  /** The schema migrated (`migrate`) or checked before the first statement: see `onModuleInit()`. */
+  private readonly readiness: StoreReadiness;
 
   constructor(options: PostgresWorkflowStoreOptions, storage?: WorkflowStorage) {
-    const executor = options?.executor;
-    if (!hasMethod(executor, 'query') || !hasMethod(executor, 'transaction') || !hasMethod(executor, 'wrapTransaction')) {
-      throw new TypeError(
-        'PostgresWorkflowStore: `executor` must be a SqlExecutor, such as fromPg(pool), fromDrizzle(db), fromTypeOrm(dataSource), fromPrisma(prisma) or fromKysely(db).',
-      );
-    }
-    if (options.migrate !== undefined && typeof options.migrate !== 'boolean') {
-      throw new TypeError(`PostgresWorkflowStore: \`migrate\` must be true or false, not ${JSON.stringify(options.migrate)}.`);
-    }
-
-    this.executor = executor;
-    this.schema = options.schema ?? DEFAULT_SCHEMA;
-    const s = quoteSchema(this.schema);
+    const resolved = workflowStoreSchema.resolveOptions(options);
+    this.executor = resolved.executor;
+    this.schema = resolved.schema;
+    const s = quoteSchema(this.schema, 'PostgresWorkflowStore');
     this.t = {
       instances: `${s}.instances`,
       journal: `${s}.journal`,
@@ -148,13 +147,13 @@ export class PostgresWorkflowStore implements WorkflowStore, OnModuleInit {
       rateLimits: `${s}.rate_limits`,
     };
     this.signalLock = `@nestjs/workflows:${this.schema}:signals`;
-    this.migrateOnStartup = options.migrate ?? process.env.NODE_ENV !== 'production';
+    this.readiness = workflowStoreSchema.readiness({ ...resolved, logger: this.logger });
     storage?.registerSource(this);
   }
 
   /** Migrates the schema (`migrate`) or checks it, before the worker starts: startup fails if it can't serve. */
   async onModuleInit(): Promise<void> {
-    await this.prepared();
+    await this.readiness.ready();
   }
 
   /**
@@ -162,30 +161,26 @@ export class PostgresWorkflowStore implements WorkflowStore, OnModuleInit {
    * lock: of processes that migrate together, one applies them. Resolves to the versions it applied (`[]`: none were
    * pending).
    */
-  async migrate(): Promise<number[]> {
-    const applied = await applyMigrations(this.executor, this.schema, MIGRATIONS);
-    if (applied.length > 0) {
-      this.logger.log(`PostgresWorkflowStore: migrated schema "${this.schema}" to version ${applied.at(-1)}.`);
-    }
-    return applied;
+  migrate(): Promise<number[]> {
+    return this.readiness.migrate();
   }
 
   // ---------------------------------------------------------------- instances
 
   async create(instance: NewWorkflowInstance): Promise<{ instance: WorkflowInstance; created: boolean }> {
-    await this.prepared();
+    await this.readiness.ready();
     return this.insertInstance(this.executor, instance);
   }
 
   /** `start(..., { transaction })`: the instance commits or rolls back with the application's rows. */
   async createInTransaction(transaction: unknown, instance: NewWorkflowInstance): Promise<{ instance: WorkflowInstance; created: boolean }> {
     const tx = this.executor.wrapTransaction(transaction);
-    await this.preparedIn(tx);
+    await this.readiness.readyIn(tx);
     return this.insertInstance(tx, instance);
   }
 
   async get(id: string, options: { journal?: boolean } = {}): Promise<WorkflowInstanceDetails | null> {
-    await this.prepared();
+    await this.readiness.ready();
     const p = new SqlParams();
     const journal = options.journal
       ? `, (SELECT coalesce(jsonb_agg(j.entry ORDER BY j.seq), '[]')::text FROM ${this.t.journal} j WHERE j.instance_id = i.id) AS journal`
@@ -206,7 +201,7 @@ WHERE i.id = ${p.text(id)}`,
   }
 
   async list(query: WorkflowListQuery): Promise<WorkflowInstance[]> {
-    await this.prepared();
+    await this.readiness.ready();
     const p = new SqlParams();
     const where = [
       ...(query.status ? [p.in('status', query.status)] : []),
@@ -224,7 +219,7 @@ ORDER BY i.created_at, i.id LIMIT ${p.int(query.limit)} OFFSET ${p.int(query.off
   }
 
   async requestCancel(id: string, { reason, now, terminate }: WorkflowCancelRequest): Promise<boolean> {
-    await this.prepared();
+    await this.readiness.ready();
     // A terminate also stops a compensating instance, and follows a cancel.
     const applies = terminate ? `status IN ${RUNNABLE} AND NOT terminate_requested` : `status IN ${CANCELLABLE} AND NOT cancel_requested`;
     const p = new SqlParams();
@@ -241,7 +236,7 @@ RETURNING id`,
 
   /** `WorkflowClient.retry()`: one conditional update, then the journal, in one transaction. */
   async reopen(id: string, reopen: WorkflowReopen): Promise<boolean> {
-    await this.prepared();
+    await this.readiness.ready();
     return this.executor.transaction(async (tx) => {
       // The update locks the row; of two concurrent retries, the second finds it changed.
       const p = new SqlParams();
@@ -267,7 +262,7 @@ RETURNING id`,
 
   /** `WorkflowClient.delete()`: its journal and waits go with it (ON DELETE CASCADE). */
   async delete(id: string, statuses: WorkflowStatus[]): Promise<boolean> {
-    await this.prepared();
+    await this.readiness.ready();
     const p = new SqlParams();
     const deleted = await this.executor.query<Row>(`DELETE FROM ${this.t.instances} WHERE id = ${p.text(id)} AND ${p.in('status', statuses)} RETURNING id`, p.values);
     return deleted.length === 1;
@@ -276,25 +271,23 @@ RETURNING id`,
   // ---------------------------------------------------------------- signals
 
   async signal(signal: NewWorkflowSignal): Promise<WorkflowSignalResult> {
-    await this.prepared();
+    await this.readiness.ready();
     return this.executor.transaction((tx) => this.insertSignal(tx, signal), READ_COMMITTED);
   }
 
   /** `signal(..., { transaction })`: the signal and its wake-ups commit with the application's rows. */
   async signalInTransaction(transaction: unknown, signal: NewWorkflowSignal): Promise<WorkflowSignalResult> {
     const tx = this.executor.wrapTransaction(transaction);
-    await this.preparedIn(tx);
-    const [row] = await tx.query<Row>("SELECT current_setting('transaction_isolation') AS isolation");
-    if (row?.isolation !== 'read committed') {
-      throw new TypeError(
-        `signal() with { transaction } needs a READ COMMITTED transaction (PostgreSQL's default); this one is ${row?.isolation}: its wake-ups would miss the waits committed after its snapshot.`,
-      );
-    }
+    await this.readiness.readyIn(tx);
+    await assertReadCommittedTransaction(tx, {
+      operation: 'signal() with { transaction }',
+      reason: 'its wake-ups would miss the waits committed after its snapshot',
+    });
     return this.insertSignal(tx, signal);
   }
 
   async signals(query: WorkflowSignalQuery): Promise<WorkflowSignalRecord[]> {
-    await this.prepared();
+    await this.readiness.ready();
     const p = new SqlParams();
     const rows = await this.executor.query<Row>(
       `SELECT id::text AS id, name, key, payload::text AS payload, created_at::text AS created_at FROM ${this.t.signals} s
@@ -308,7 +301,7 @@ ORDER BY s.id`,
   // ---------------------------------------------------------------- retention
 
   async purge(query: WorkflowPurgeQuery): Promise<WorkflowPurgeResult> {
-    await this.prepared();
+    await this.readiness.ready();
     const count = async (statement: string, p: SqlParams) => toInt((await this.executor.query<Row>(statement, p.values))[0]?.n) ?? 0;
 
     // The condition again on the deleted rows: an instance reopened since the subquery read it stays. Its journal and
@@ -366,7 +359,7 @@ SELECT count(*)::text AS n FROM ended`,
   // ---------------------------------------------------------------- schedules
 
   async saveSchedule(save: WorkflowScheduleSave): Promise<WorkflowScheduleRecord | null> {
-    await this.prepared();
+    await this.readiness.ready();
     const p = new SqlParams();
     const now = p.bigint(save.now);
     const fields = {
@@ -403,14 +396,14 @@ RETURNING ${columns(SCHEDULE_COLUMNS)}`,
   }
 
   async getSchedule(id: string): Promise<WorkflowScheduleRecord | null> {
-    await this.prepared();
+    await this.readiness.ready();
     const p = new SqlParams();
     const [row] = await this.executor.query<Row>(`SELECT ${columns(SCHEDULE_COLUMNS)} FROM ${this.t.schedules} WHERE id = ${p.text(id)}`, p.values);
     return row ? toSchedule(row) : null;
   }
 
   async listSchedules(query: WorkflowScheduleQuery): Promise<WorkflowScheduleRecord[]> {
-    await this.prepared();
+    await this.readiness.ready();
     const p = new SqlParams();
     const where = [
       ...(query.workflow !== undefined ? [`workflow = ${p.text(query.workflow)}`] : []),
@@ -425,7 +418,7 @@ ORDER BY s.id LIMIT ${p.int(query.limit)} OFFSET ${p.int(query.offset)}`,
   }
 
   async deleteSchedule(id: string, revision?: number): Promise<boolean> {
-    await this.prepared();
+    await this.readiness.ready();
     const p = new SqlParams();
     const deleted = await this.executor.query<Row>(
       `DELETE FROM ${this.t.schedules} WHERE id = ${p.text(id)}${revision !== undefined ? ` AND revision = ${p.int(revision)}` : ''} RETURNING id`,
@@ -435,7 +428,7 @@ ORDER BY s.id LIMIT ${p.int(query.limit)} OFFSET ${p.int(query.offset)}`,
   }
 
   async claimSchedules(request: WorkflowScheduleClaimRequest): Promise<WorkflowScheduleRecord[]> {
-    await this.prepared();
+    await this.readiness.ready();
     // Locked; schedules another claim is locking right now are skipped instead of waited for.
     const p = new SqlParams();
     const now = p.bigint(request.now);
@@ -458,7 +451,7 @@ SELECT ${columns(SCHEDULE_COLUMNS)} FROM claimed ORDER BY claimed.wake_at, claim
   }
 
   async writeSchedule(id: string, token: string, write: WorkflowScheduleWrite): Promise<boolean> {
-    await this.prepared();
+    await this.readiness.ready();
     const p = new SqlParams();
     const written = await this.executor.query<Row>(
       `UPDATE ${this.t.schedules}
@@ -473,7 +466,7 @@ RETURNING id`,
   // ---------------------------------------------------------------- the worker
 
   async claim(request: WorkflowClaimRequest): Promise<WorkflowClaim> {
-    await this.prepared();
+    await this.readiness.ready();
     if (request.limits?.length || request.rateLimits?.length) {
       return this.executor.transaction((tx) => this.claimWithin(tx, request), READ_COMMITTED);
     }
@@ -495,9 +488,7 @@ FOR UPDATE SKIP LOCKED`;
   private async claimWithin(tx: SqlTransaction, request: WorkflowClaimRequest): Promise<WorkflowClaim> {
     const limits = request.limits ?? [];
     const rates = request.rateLimits ?? [];
-    for (const workflow of [...new Set(limits.map((limit) => limit.workflow))].sort()) {
-      await this.lock(tx, `@nestjs/workflows:${this.schema}:concurrency:${workflow}`);
-    }
+    await advisoryLock(tx, limits.map((limit) => `@nestjs/workflows:${this.schema}:concurrency:${limit.workflow}`));
 
     // Candidates with no room at all are passed over; then each concurrency key's first, as many as its free slots; of
     // those, each rate key's, as many as its window has room for; of those, each workflow's, as many as both its free
@@ -673,7 +664,7 @@ SELECT ${columns(INSTANCE_COLUMNS)} FROM claimed ORDER BY claimed.priority, clai
   }
 
   async renew(id: string, token: string, leaseUntil: number): Promise<{ cancelRequested: boolean; terminateRequested: boolean } | null> {
-    await this.prepared();
+    await this.readiness.ready();
     const p = new SqlParams();
     const [row] = await this.executor.query<Row>(
       `UPDATE ${this.t.instances} SET lease_until = ${p.bigint(leaseUntil)} WHERE id = ${p.text(id)} AND lease_token = ${p.text(token)}
@@ -684,13 +675,13 @@ RETURNING cancel_requested::text AS cancel_requested, terminate_requested::text 
   }
 
   async write(id: string, token: string, write: WorkflowWrite): Promise<boolean> {
-    await this.prepared();
+    await this.readiness.ready();
     return this.executor.transaction(async (tx) => {
       const release = write.release;
       if (write.signal) {
-        await this.lock(tx, this.signalLock);
+        await advisoryLock(tx, this.signalLock);
       } else if (release && release.waits.length > 0) {
-        await this.lock(tx, this.signalLock, 'shared');
+        await advisoryLock(tx, this.signalLock, { shared: true });
       }
 
       // The fence: only the lease holder writes, and the row stays locked until commit.
@@ -732,52 +723,6 @@ RETURNING cancel_requested::text AS cancel_requested, terminate_requested::text 
 
   // ---------------------------------------------------------------- internals
 
-  /** Resolves once the schema can serve: migrated (with `migrate`) or checked. A failure is tried again at the next call. */
-  private prepared(): Promise<void> {
-    if (this.ready) {
-      return Promise.resolve();
-    }
-
-    this.readiness ??= this.prepare().then(
-      () => {
-        this.ready = true;
-      },
-      (error: unknown) => {
-        this.readiness = undefined;
-        throw error;
-      },
-    );
-    return this.readiness;
-  }
-
-  private async prepare(): Promise<void> {
-    await assertReadCommitted(this.executor);
-    if (this.migrateOnStartup) {
-      await this.migrate();
-    } else {
-      await assertMigrated(this.executor, this.schema, MIGRATIONS);
-    }
-  }
-
-  /**
-   * In the application's transaction, a store not known to be ready checks its schema through that transaction: a
-   * statement outside it could wait for it (PGlite, and a pool of one, have one connection).
-   */
-  private async preparedIn(tx: SqlTransaction): Promise<void> {
-    if (this.ready) {
-      return;
-    }
-
-    await assertReadCommitted(tx);
-    await assertMigrated(
-      tx,
-      this.schema,
-      MIGRATIONS,
-      "The store applies its migrations when the application starts (onModuleInit), or at its first call outside a transaction: it can't apply them in yours.",
-    );
-    this.ready = true;
-  }
-
   private async insertInstance(db: SqlTransaction, i: NewWorkflowInstance): Promise<{ instance: WorkflowInstance; created: boolean }> {
     // An instance deleted between the insert that met it and the read of it is created again.
     for (let attempt = 1; ; attempt++) {
@@ -810,7 +755,7 @@ RETURNING ${columns(INSTANCE_COLUMNS)}`,
   }
 
   private async insertSignal(tx: SqlTransaction, s: NewWorkflowSignal): Promise<WorkflowSignalResult> {
-    await this.lock(tx, this.signalLock);
+    await advisoryLock(tx, this.signalLock);
 
     // A name and dedupe id stored before make this a no-op: the unique constraint decides, with nothing to catch,
     // because an error would abort the application's transaction.
@@ -894,39 +839,10 @@ ON CONFLICT (instance_id, name) DO UPDATE SET entry = excluded.entry`,
   AND (${alias}.lease_until IS NULL OR ${alias}.lease_until < ${now}) AND (${alias}.workflow, ${alias}.version) IN (VALUES ${versions})`;
   }
 
-  /** A transaction-scoped advisory lock: released when the transaction ends, so it's safe behind a pooler. */
-  private async lock(tx: SqlTransaction, key: string, mode: 'exclusive' | 'shared' = 'exclusive'): Promise<void> {
-    await tx.query(`SELECT pg_advisory_xact_lock${mode === 'shared' ? '_shared' : ''}(hashtext($1::text))::text AS locked`, [key]);
-  }
-
   private async lastSignalId(db: SqlTransaction): Promise<number> {
     const [row] = await db.query<Row>(`SELECT coalesce(max(id), 0)::text AS id FROM ${this.t.signals}`);
     return toInt(row?.id) ?? 0;
   }
-}
-
-/**
- * The store's statements outside its transactions (a cancel's update, a claim, an insert-or-ignore) race each other.
- * READ COMMITTED, PostgreSQL's default, has one that meets a row another changed meanwhile wait for it and look again;
- * under REPEATABLE READ or SERIALIZABLE it would fail with a serialization error instead.
- */
-async function assertReadCommitted(db: SqlTransaction): Promise<void> {
-  const [row] = await db.query<Row>("SELECT current_setting('default_transaction_isolation') AS isolation");
-  if (row?.isolation !== 'read committed') {
-    throw new Error(
-      `PostgresWorkflowStore needs the database's default transaction isolation to be READ COMMITTED (PostgreSQL's default), not ${row?.isolation}: ` +
-        'its statements race each other, and would fail with serialization errors. Set default_transaction_isolation back for the database, ' +
-        "or for the store's connections (a pool of their own).",
-    );
-  }
-}
-
-/**
- * `names` cast to text, as `SqlParams` explains, each under its own name. An ORDER BY of the statement names its
- * columns with their table (`i.created_at`): a bare name would sort the text.
- */
-function columns(names: readonly string[], alias?: string): string {
-  return names.map((name) => `${alias ? `${alias}.` : ''}${name}::text AS ${name}`).join(', ');
 }
 
 function toInstance(row: Row): WorkflowInstance {

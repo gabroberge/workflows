@@ -1,15 +1,15 @@
 /**
- * PostgresWorkflowStore's migrations: a new database, a rerun, processes migrating at once, `migrationSql()` against
- * what `migrate()` applies, a schema behind the code (and ahead of it), a failing migration, a schema someone created
- * or filled, the production default, and a first call inside the application's transaction.
+ * PostgresWorkflowStore's migrations, on the kit's StoreSchema (@nestjs/store-kit's own suite covers its machinery with
+ * a schema of its own): a new database, a rerun, processes migrating at once, `migrationSql()` against what `migrate()`
+ * applies and under which lock, the fixture's indexes, a colliding table, a schema behind the code (and ahead of it),
+ * the production default, the default isolation, the options, and a first call inside the application's transaction.
  */
 import { readFileSync } from 'node:fs';
 import { drizzle } from 'drizzle-orm/pglite';
 import { PGlite } from '@electric-sql/pglite';
 import pg from 'pg';
 import { fromDrizzle, fromPg, PostgresWorkflowStore, WorkflowSchemaError, type SqlExecutor, type SqlTransaction } from '../../lib/postgres/index.js';
-import { MIGRATIONS } from '../../lib/postgres/migrations/index.js';
-import { applyMigrations, assertMigrated, migrationStatements, type StoreMigration } from '../../lib/postgres/utils/migrations.util.js';
+import { workflowStoreSchema } from '../../lib/postgres/migrations/index.js';
 import { testDatabase } from './support.js';
 
 const { database, reason } = await testDatabase('pgstore_migrations');
@@ -37,20 +37,21 @@ const pool = () => {
 const store = (schema: string, options: { migrate?: boolean; executor?: SqlExecutor } = {}) =>
   new PostgresWorkflowStore({ executor: options.executor ?? fromPg(pool()), schema, migrate: options.migrate });
 
-/** An executor that records every statement it runs. */
-function recording(executor: SqlExecutor): { executor: SqlExecutor; statements: string[] } {
-  const statements: string[] = [];
+/** An executor that records every statement it runs, and its parameters. */
+function recording(executor: SqlExecutor): { executor: SqlExecutor; statements: Array<{ text: string; params?: readonly unknown[] }> } {
+  const statements: Array<{ text: string; params?: readonly unknown[] }> = [];
   const record = (tx: SqlTransaction): SqlTransaction => ({
     query: (text, params) => {
-      statements.push(text);
+      statements.push({ text, params });
       return tx.query(text, params);
     },
   });
   return {
     statements,
     executor: {
+      dialect: executor.dialect,
       query: (text, params) => {
-        statements.push(text);
+        statements.push({ text, params });
         return executor.query(text, params);
       },
       transaction: (work, options) => executor.transaction((tx) => work(record(tx)), options),
@@ -60,7 +61,7 @@ function recording(executor: SqlExecutor): { executor: SqlExecutor; statements: 
 }
 
 /** The statements that change the schema: not the lock, and not the reads of what it has. */
-const changes = (statements: string[]) => statements.filter((statement) => !statement.startsWith('SELECT'));
+const changes = (statements: Array<{ text: string }>) => statements.map((statement) => statement.text).filter((text) => !text.startsWith('SELECT'));
 
 const rows = async (sql: string, params: unknown[] = []) => (await database!.admin.query(sql, params)).rows;
 
@@ -85,8 +86,6 @@ async function catalog(schema: string) {
 
 const tables = async (schema: string) =>
   (await rows('SELECT table_name FROM information_schema.tables WHERE table_schema = $1 ORDER BY table_name', [schema])).map((row) => row.table_name);
-
-const extra: StoreMigration = { version: 2, name: 'extra', up: (s) => [`CREATE TABLE ${s}.extra (id integer PRIMARY KEY)`] };
 
 describe('migrate()', () => {
   onPostgres();
@@ -115,15 +114,16 @@ describe('migrate()', () => {
     expect(await starting[3]!.create({ id: 'i-1', workflow: 'w', version: 1, input: null, deadline: null, now: 1 })).toMatchObject({ created: true });
   });
 
-  it('runs the statements migrationSql() prints, and a database migrated with them is the same as one migrate() made', async () => {
+  it('runs the statements migrationSql() prints under the lock it has always taken, and a database migrated with them is the same as one migrate() made', async () => {
     const recorder = recording(fromPg(pool()));
     await store('m_migrated', { executor: recorder.executor }).migrate();
+    expect(recorder.statements[0]).toEqual({ text: 'SELECT pg_advisory_xact_lock(hashtext($1::text))::text AS locked', params: ['@nestjs/workflows:migrate:m_migrated'] });
     const script = PostgresWorkflowStore.migrationSql({ schema: 'm_migrated' });
     expect(script).toBe(
       `-- @nestjs/workflows: PostgresWorkflowStore's schema "m_migrated", from version 0 to 1.\n-- Run it in one transaction.\n\n` +
         `${changes(recorder.statements).map((statement) => `${statement};`).join('\n\n')}\n`,
     );
-    expect(changes(recorder.statements)).toEqual(migrationStatements('m_migrated', MIGRATIONS));
+    expect(changes(recorder.statements)).toEqual(workflowStoreSchema.statements({ schema: 'm_migrated' }));
 
     // As a team applies it with its own tool: one script, in one transaction.
     const client = await pool().connect();
@@ -155,31 +155,15 @@ describe('migrate()', () => {
     ]);
   });
 
-  it("uses a schema someone created for the store as it is, without CREATE SCHEMA (which needs the database's CREATE privilege)", async () => {
-    await rows('CREATE SCHEMA m_precreated');
-    const recorder = recording(fromPg(pool()));
-    expect(await store('m_precreated', { executor: recorder.executor }).migrate()).toEqual([1]);
-    expect(changes(recorder.statements)).toEqual(migrationStatements('m_precreated', MIGRATIONS).filter((statement) => !statement.startsWith('CREATE SCHEMA')));
-  });
-
-  it('applies nothing of a migration that fails, and says which versions it was between', async () => {
-    await store('m_failing').migrate();
-    const broken: StoreMigration = { version: 2, name: 'broken', up: (s) => [`CREATE TABLE ${s}.extra (id integer)`, 'SELECT 1 / 0'] };
-
-    const error = await applyMigrations(fromPg(pool()), 'm_failing', [...MIGRATIONS, broken]).catch((e: unknown) => e);
-    expect(error).toBeInstanceOf(WorkflowSchemaError);
-    expect(error).toMatchObject({ schema: 'm_failing', version: 1, requiredVersion: 2, cause: { message: 'division by zero' } });
-    expect((error as Error).message).toBe(
-      'PostgresWorkflowStore: migrating schema "m_failing" from version 1 to 2 failed, and nothing was applied: division by zero',
-    );
-    expect(await tables('m_failing')).not.toContain('extra');
-    expect(await rows('SELECT max(version) AS version FROM m_failing.migrations')).toEqual([{ version: 1 }]);
-  });
-
   it("fails on a schema that has other tables of the store's names, and creates nothing", async () => {
     await rows('CREATE SCHEMA m_taken');
     await rows('CREATE TABLE m_taken.instances (id serial PRIMARY KEY)');
-    await expect(store('m_taken').migrate()).rejects.toThrow('PostgresWorkflowStore: migrating schema "m_taken" from version 0 to 1 failed, and nothing was applied: relation "instances" already exists');
+    const error = await store('m_taken').migrate().catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(WorkflowSchemaError);
+    expect(error).toMatchObject({ schema: 'm_taken', version: 0, requiredVersion: 1, cause: { message: 'relation "instances" already exists' } });
+    expect((error as Error).message).toBe(
+      'PostgresWorkflowStore: migrating schema "m_taken" from version 0 to 1 failed, and nothing was applied: relation "instances" already exists',
+    );
     expect(await tables('m_taken')).toEqual(['instances']);
   });
 });
@@ -205,23 +189,14 @@ describe('a schema behind the code', () => {
     expect(await behind.get('any')).toBeNull();
   });
 
-  it('is found at the version the code needs next, while a schema ahead of the code (migrated by a newer version) serves', async () => {
-    const executor = fromPg(pool());
-    await store('m_versions').migrate();
-    const newer = [...MIGRATIONS, extra];
+  it('serves a schema ahead of the code, which a newer version of the package migrated during a rolling deploy', async () => {
+    await store('m_ahead').migrate();
+    await rows("INSERT INTO m_ahead.migrations (version, name) VALUES (2, 'newer')");
 
-    await expect(assertMigrated(executor, 'm_versions', newer)).rejects.toMatchObject({ version: 1, requiredVersion: 2 });
-    expect(migrationStatements('m_versions', newer, { from: 1 })).toEqual([
-      'CREATE TABLE "m_versions".extra (id integer PRIMARY KEY)',
-      `INSERT INTO "m_versions".migrations (version, name) VALUES (2, 'extra')`,
-    ]);
-    expect(await applyMigrations(executor, 'm_versions', newer)).toEqual([2]);
-
-    // This version of the package (version 1) on a schema a newer one migrated to version 2, as in a rolling deploy.
-    const older = store('m_versions', { migrate: false });
+    const older = store('m_ahead', { migrate: false });
     await expect(older.onModuleInit()).resolves.toBeUndefined();
     expect(await older.create({ id: 'i-1', workflow: 'w', version: 1, input: null, deadline: null, now: 1 })).toMatchObject({ created: true });
-    expect(await store('m_versions').migrate()).toEqual([]);
+    expect(await store('m_ahead').migrate()).toEqual([]);
   });
 });
 
@@ -263,8 +238,13 @@ describe('options', () => {
     expect(await tables('Mixed_Case')).toContain('instances');
   });
 
-  it('refuse an executor that is none, and a migrate that is no boolean', () => {
+  it('refuse an executor that is none or of another database, and a migrate that is no boolean', () => {
     expect(() => new PostgresWorkflowStore({ executor: {} as SqlExecutor })).toThrow('PostgresWorkflowStore: `executor` must be a SqlExecutor');
+    const executor = fromPg(pool());
+    const mysql = { dialect: 'mysql', query: executor.query.bind(executor), transaction: executor.transaction.bind(executor), wrapTransaction: executor.wrapTransaction.bind(executor) };
+    expect(() => new PostgresWorkflowStore({ executor: mysql as SqlExecutor })).toThrow(
+      "PostgresWorkflowStore runs on PostgreSQL, and `executor` is a MySQL executor: import the executor from '@nestjs/workflows/postgres' (fromPg, fromDrizzle, fromTypeOrm, fromPrisma or fromKysely).",
+    );
     expect(() => new PostgresWorkflowStore({ executor: fromPg(pool()), migrate: 'yes' as unknown as boolean })).toThrow(
       'PostgresWorkflowStore: `migrate` must be true or false, not "yes".',
     );

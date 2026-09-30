@@ -1,9 +1,6 @@
 #!/usr/bin/env node
 // The `nest-workflows` command: PostgresWorkflowStore's migrations from a shell or a CI step.
-import { runCli } from './utils/cli.util.js';
+import { runStoreCli } from '@nestjs/store-kit';
+import { workflowStoreSchema } from './migrations/index.js';
 
-process.exitCode = await runCli(process.argv.slice(2), {
-  out: (text) => process.stdout.write(text),
-  err: (text) => process.stderr.write(text),
-  env: process.env,
-});
+process.exitCode = await runStoreCli([workflowStoreSchema], process.argv.slice(2));

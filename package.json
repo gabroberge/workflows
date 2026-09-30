@@ -57,6 +57,9 @@
     "release": "release-it",
     "prepare": "husky"
   },
+  "dependencies": {
+    "@nestjs/store-kit": "^0.1.0"
+  },
   "devDependencies": {
     "@commitlint/cli": "21.2.3",
     "@commitlint/config-angular": "21.2.3",
@@ -95,23 +98,11 @@
     "@nestjs/common": "^11.0.0 || ^12.0.0",
     "@nestjs/core": "^11.0.0 || ^12.0.0",
     "@nestjs/cqrs": "^11.0.0 || ^12.0.0",
-    "drizzle-orm": ">=0.29.0 || >=1.0.0-0",
-    "kysely": ">=0.27.0",
-    "pg": "^8.0.0",
     "reflect-metadata": "^0.1.13 || ^0.2.0",
     "rxjs": "^7.1.0"
   },
   "peerDependenciesMeta": {
     "@nestjs/cqrs": {
-      "optional": true
-    },
-    "drizzle-orm": {
-      "optional": true
-    },
-    "kysely": {
-      "optional": true
-    },
-    "pg": {
       "optional": true
     }
   },

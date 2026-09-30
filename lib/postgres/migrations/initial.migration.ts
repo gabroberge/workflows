@@ -1,4 +1,4 @@
-import type { StoreMigration } from '../utils/migrations.util.js';
+import type { StoreMigration } from '@nestjs/store-kit/postgres';
 
 /**
  * The store's tables. Times are epoch milliseconds from the engine's clock (`bigint`); inputs, outputs, errors,
