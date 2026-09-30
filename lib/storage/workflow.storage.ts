@@ -131,9 +131,10 @@ export class WorkflowStorage {
     if (!this.registered && process.env.NODE_ENV === 'production' && !this.options?.allowInMemoryStorage) {
       throw new Error(
         'WorkflowStorage: no WorkflowStore is registered, and NODE_ENV is "production": in memory, running workflows ' +
-          'would be lost on restart and not shared between instances. Implement WorkflowStore in a provider that ' +
-          'injects WorkflowStorage and calls `storage.registerSource(this)` in its constructor, or set ' +
-          '`allowInMemoryStorage: true` in the WorkflowsModule options to run in memory anyway.',
+          'would be lost on restart and not shared between instances. Register a store on your database: ' +
+          'PostgresWorkflowStore (@nestjs/workflows/postgres), MySqlWorkflowStore (@nestjs/workflows/mysql), or your own ' +
+          'WorkflowStore in a provider that injects WorkflowStorage and calls `storage.registerSource(this)` in its ' +
+          'constructor. Or set `allowInMemoryStorage: true` in the WorkflowsModule options to run in memory anyway.',
       );
     }
 
