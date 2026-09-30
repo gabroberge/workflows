@@ -24,8 +24,8 @@ import {
 } from './cqrs-app.js';
 import type { Database } from './fixtures/database/drizzle.js';
 import * as schema from './fixtures/database/schema.js';
-import { orders, workflowSignals } from './fixtures/database/schema.js';
-import { boot, connect, openStore, storeKind, tempDb, waitFor, type Connection, type Node, type TestDb } from './support.js';
+import { orders } from './fixtures/database/schema.js';
+import { boot, connect, openStore, storedSignals, storeKind, tempDb, waitFor, type Connection, type Node, type TestDb } from './support.js';
 
 class ParcelPackedEvent {
   constructor(readonly orderId: string) {}
@@ -295,7 +295,7 @@ describe('workflows started and signalled by CQRS events', () => {
         await close();
       }
     };
-    const signalCount = async () => (await database.select({ id: workflowSignals.id }).from(workflowSignals)).length;
+    const signalCount = async () => (await database.select({ id: storedSignals.id }).from(storedSignals)).length;
 
     it('commits the instance with the order, and the worker runs it after the commit', async () => {
       const node = await start();

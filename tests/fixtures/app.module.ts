@@ -1,8 +1,9 @@
 import { Module } from '@nestjs/common';
-import { DrizzleModule } from '@nestjs/drizzle';
-import { WorkflowsModule } from '../../lib/index.js';
+import { DrizzleModule, getDrizzleToken } from '@nestjs/drizzle';
+import { WorkflowsModule, WorkflowStorage } from '../../lib/index.js';
+import { fromDrizzle, PostgresWorkflowStore } from '../../lib/postgres/index.js';
 import { drizzle } from 'drizzle-orm/node-postgres';
-import { DrizzleWorkflowStore } from './database/drizzle-workflow.store.js';
+import type { Database } from './database/drizzle.js';
 import * as schema from './database/schema.js';
 import { InventoryService } from './inventory/inventory.service.js';
 import { InvoiceBatchWorkflow } from './invoices/invoice-batch.workflow.js';
@@ -31,7 +32,12 @@ import { CarrierWebhookController } from './shipping/carrier-webhook.controller.
   ],
   controllers: [OrdersController, CarrierWebhookController],
   providers: [
-    DrizzleWorkflowStore, // instances and journals in your database
+    {
+      // Instances and journals in your database, in a schema of their own (nest_workflows)
+      provide: PostgresWorkflowStore,
+      inject: [getDrizzleToken(), WorkflowStorage],
+      useFactory: (db: Database, storage: WorkflowStorage) => new PostgresWorkflowStore({ executor: fromDrizzle(db) }, storage),
+    },
     OrdersService,
     PaymentProviderClient,
     PaymentsService,

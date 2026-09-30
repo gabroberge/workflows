@@ -1,7 +1,7 @@
 /**
  * `start()` and `signal()` inside the application's transaction, on the workflows tutorial's
- * application (its controllers, services, workflow and `DrizzleWorkflowStore`) served on
- * Express and Fastify, over PGlite and PostgreSQL. The in-memory store can't roll anything
+ * application (its controllers, services and workflow, and `PostgresWorkflowStore` on its Drizzle
+ * database) served on Express and Fastify, over PGlite and PostgreSQL. The in-memory store can't roll anything
  * back, so these run on the SQL stores only (storage.spec.ts covers its warning).
  */
 import { BadRequestException, Body, Controller, Module, Post } from '@nestjs/common';

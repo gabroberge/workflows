@@ -15,7 +15,7 @@ import {
   type WorkflowScheduleSkippedEvent,
   type WorkflowStore,
 } from '../lib/index.js';
-import { DrizzleWorkflowStore } from './fixtures/database/drizzle-workflow.store.js';
+import { PostgresWorkflowStore } from '../lib/postgres/index.js';
 import { boot, storeKind, tempDb, World, type Node, type TestDb } from './support.js';
 
 const T0 = Date.UTC(2026, 0, 1); // a Thursday, midnight UTC
@@ -263,7 +263,7 @@ describe('a declared schedule, in edge cases', () => {
     expect(await dropped.client.schedules.get('stock-report')).toMatchObject({ declared: true });
 
     // Every node's store is one of these (each SQL node opens its own).
-    const prototype = (storeKind === 'memory' ? InMemoryWorkflowStore : DrizzleWorkflowStore).prototype as WorkflowStore;
+    const prototype = (storeKind === 'memory' ? InMemoryWorkflowStore : PostgresWorkflowStore).prototype as WorkflowStore;
     const deleteSchedule = prototype.deleteSchedule;
     const spy = vi.spyOn(prototype, 'deleteSchedule').mockImplementationOnce(async function (this: WorkflowStore, id, revision) {
       await dropped.client.schedules.pause('stock-report'); // the revision moves on, and nobody confirmed it

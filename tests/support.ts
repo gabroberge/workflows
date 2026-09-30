@@ -6,13 +6,14 @@ import { Test, type TestingModule } from '@nestjs/testing';
 import { sql } from 'drizzle-orm';
 import { drizzle as drizzlePg } from 'drizzle-orm/node-postgres';
 import { migrate as migratePg } from 'drizzle-orm/node-postgres/migrator';
+import { bigint, pgSchema, text } from 'drizzle-orm/pg-core';
 import { drizzle as drizzlePglite } from 'drizzle-orm/pglite';
 import { migrate as migratePglite } from 'drizzle-orm/pglite/migrator';
 import pg from 'pg';
 import type { Database } from './fixtures/database/drizzle.js';
-import { DrizzleWorkflowStore } from './fixtures/database/drizzle-workflow.store.js';
 import * as schema from './fixtures/database/schema.js';
 import { startPostgres } from './support/postgres.js';
+import { fromDrizzle, PostgresWorkflowStore } from '../lib/postgres/index.js';
 import {
   InMemoryWorkflowStore,
   WorkflowClient,
@@ -35,10 +36,12 @@ import {
  *
  * - `memory` (the default): `InMemoryWorkflowStore`. A "restart" registers the same store
  *   object in the new application, as a database outlives a process.
- * - `pglite`: the workflows tutorial's `DrizzleWorkflowStore`, with its drizzle-kit
- *   migrations, on PGlite (PostgreSQL in-process, one connection). A restart opens a new
- *   Drizzle instance on the same PGlite.
- * - `postgres`: the same store on a PostgreSQL server: `SQL_TEST_PG_URL`, else a throwaway
+ * - `pglite`: `PostgresWorkflowStore` (`@nestjs/workflows/postgres`) through `fromDrizzle()`,
+ *   as the tutorial's app registers it, on PGlite (PostgreSQL in-process, one connection). A
+ *   restart opens a new Drizzle instance on the same PGlite. The database also has the
+ *   tutorial's tables (its drizzle-kit migrations): the app's `orders`, and the hand-written
+ *   `DrizzleWorkflowStore`'s, which contract.spec.ts checks.
+ * - `postgres`: the same on a PostgreSQL server: `SQL_TEST_PG_URL`, else a throwaway
  *   cluster from local binaries, else every test is skipped with the reason. Every
  *   application opens its own pool, so several on one database race on real connections.
  *
@@ -51,8 +54,8 @@ if (!['memory', 'pglite', 'postgres'].includes(storeKind)) {
 }
 export const storeLabel = {
   memory: 'InMemoryWorkflowStore',
-  pglite: 'DrizzleWorkflowStore on PGlite',
-  postgres: 'DrizzleWorkflowStore on PostgreSQL',
+  pglite: 'PostgresWorkflowStore on PGlite',
+  postgres: 'PostgresWorkflowStore on PostgreSQL',
 }[storeKind];
 
 const migrationsFolder = fileURLToPath(new URL('./fixtures/drizzle', import.meta.url));
@@ -64,13 +67,22 @@ interface SqlBackend {
 }
 
 const truncate = async (db: Database) => {
+  await db.execute(
+    sql`TRUNCATE nest_workflows.instances, nest_workflows.journal, nest_workflows.waits, nest_workflows.signals, nest_workflows.rate_limits, nest_workflows.schedules RESTART IDENTITY`,
+  );
   await db.execute(sql`TRUNCATE workflow_instances, workflow_journal, workflow_waits, workflow_signals, workflow_rate_limits, workflow_schedules RESTART IDENTITY`);
+};
+
+/** The tutorial's migrations (its `orders`, and the hand-written store's tables), then PostgresWorkflowStore's own. */
+const migrate = async (db: Database, drizzleKit: (db: Database) => Promise<void>) => {
+  await drizzleKit(db);
+  await new PostgresWorkflowStore({ executor: fromDrizzle(db) }).migrate();
 };
 
 async function pgliteBackend(): Promise<SqlBackend> {
   const client = new PGlite();
   const db = drizzlePglite(client, { schema }) as unknown as Database;
-  await migratePglite(db as never, { migrationsFolder });
+  await migrate(db, (db) => migratePglite(db as never, { migrationsFolder }));
   afterAll(() => client.close());
 
   return {
@@ -89,7 +101,7 @@ async function postgresBackend(): Promise<SqlBackend | string> {
   const url = await postgres.createDatabase('workflows_engine');
   const admin = new pg.Pool({ connectionString: url, max: 2 });
   const adminDb = drizzlePg(admin, { schema });
-  await migratePg(adminDb, { migrationsFolder });
+  await migrate(adminDb, (db) => migratePg(db, { migrationsFolder }));
 
   afterAll(async () => {
     await admin.end();
@@ -153,9 +165,17 @@ export function connect(db: TestDb): Connection {
 /** A store on the test database outside any application, to look at what one left behind. */
 export function openStore(db: TestDb): { store: WorkflowStore; close(): Promise<void> } {
   const connection = connect(db);
-  const store = connection.db instanceof InMemoryWorkflowStore ? connection.db : new DrizzleWorkflowStore(connection.db, new WorkflowStorage());
+  const store = connection.db instanceof InMemoryWorkflowStore ? connection.db : new PostgresWorkflowStore({ executor: fromDrizzle(connection.db), migrate: false });
   return { store, close: () => connection.close() };
 }
+
+/** PostgresWorkflowStore's signals, for tests that read what a run left in the database. */
+export const storedSignals = pgSchema('nest_workflows').table('signals', {
+  id: bigint('id', { mode: 'number' }).notNull(),
+  name: text('name').notNull(),
+  key: text('key'),
+  dedupeId: text('dedupe_id'),
+});
 
 /** The connection a `databaseModule()` provides. */
 export const DATABASE = Symbol('DATABASE');
@@ -232,13 +252,21 @@ class InMemoryAppStore implements WorkflowStore {
   }
 }
 
+/** PostgresWorkflowStore as an app registers it: on the Drizzle database it injects. */
+@Injectable()
+class PostgresAppStore extends PostgresWorkflowStore {
+  constructor(@Inject(getDrizzleToken()) db: Database, storage: WorkflowStorage) {
+    super({ executor: fromDrizzle(db) }, storage);
+  }
+}
+
 /**
  * The store provider as an app writes one: it injects its database (from `databaseModule()`)
- * and registers itself in its constructor. The tutorial's `DrizzleWorkflowStore`, or in the
- * memory runs a provider over the test database's in-memory store. A subclass that declares no
- * constructor (and no decorator) keeps the injection.
+ * and registers itself in its constructor. PostgresWorkflowStore on the app's Drizzle database,
+ * or in the memory runs a provider over the test database's in-memory store. A subclass that
+ * declares no constructor (and no decorator) keeps the injection.
  */
-export const AppWorkflowStore: Type<WorkflowStore> = sqlBackend ? DrizzleWorkflowStore : InMemoryAppStore;
+export const AppWorkflowStore: Type<WorkflowStore> = sqlBackend ? PostgresAppStore : InMemoryAppStore;
 
 /**
  * The app's database module on the test database, like a hand-written database module: it provides
@@ -288,7 +316,7 @@ export interface Node {
   moduleRef: TestingModule;
   client: WorkflowClient;
   worker: WorkflowWorker;
-  /** The registered store: the database's in-memory store, or a DrizzleWorkflowStore on this node's connection. */
+  /** The registered store: the database's in-memory store, or a PostgresWorkflowStore on this node's connection. */
   store: WorkflowStore;
   events: WorkflowEvent[];
   /** Graceful shutdown (app.close()), then the node's connection is closed. */
@@ -309,6 +337,17 @@ export async function boot(options: {
   codec?: WorkflowsModuleOptions['codec'];
 }): Promise<Node> {
   const connection = connect(options.db);
+  try {
+    return await bootOn(connection, options);
+  } catch (error) {
+    // A startup that fails (a definition error, say) still closes the process's connection: the store may have
+    // opened one to check its schema, and a pool left open is terminated, with an error, when the database is dropped.
+    await connection.close();
+    throw error;
+  }
+}
+
+async function bootOn(connection: Connection, options: Parameters<typeof boot>[0]): Promise<Node> {
   const drizzle = connection.db instanceof InMemoryWorkflowStore ? null : connection.db;
   const moduleRef = await Test.createTestingModule({
     imports: [
@@ -325,11 +364,11 @@ export async function boot(options: {
       ...options.workflows,
       ...(options.providers ?? []),
       // As an app registers it: a provider that injects the database and registers itself.
-      ...(drizzle ? [DrizzleWorkflowStore, { provide: getDrizzleToken(), useValue: drizzle }] : []),
+      ...(drizzle ? [PostgresAppStore, { provide: getDrizzleToken(), useValue: drizzle }] : []),
     ],
   }).compile();
 
-  const store = drizzle ? moduleRef.get(DrizzleWorkflowStore) : (connection.db as InMemoryWorkflowStore);
+  const store = drizzle ? moduleRef.get(PostgresAppStore) : (connection.db as InMemoryWorkflowStore);
   if (!drizzle) {
     moduleRef.get(WorkflowStorage).registerSource(store);
   }

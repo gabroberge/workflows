@@ -22,8 +22,8 @@ import {
   PaymentCapturedEvent,
 } from './cqrs-app.js';
 import type { Database } from './fixtures/database/drizzle.js';
-import { orders, workflowSignals } from './fixtures/database/schema.js';
-import { boot, connect, storeKind, tempDb, waitFor, type Connection, type Node, type TestDb } from './support.js';
+import { orders } from './fixtures/database/schema.js';
+import { boot, connect, storedSignals, storeKind, tempDb, waitFor, type Connection, type Node, type TestDb } from './support.js';
 
 class Order extends AggregateRoot {
   constructor(readonly id: string) {
@@ -121,7 +121,7 @@ describe('aggregates’ events', () => {
       await placeAndPay(node, order);
       expect(order.getUncommittedEvents()).toEqual([]);
       expect(await database.select({ id: orders.id }).from(orders)).toEqual([{ id: 'o-1' }]);
-      expect(await database.select({ key: workflowSignals.key, dedupeId: workflowSignals.dedupeId }).from(workflowSignals)).toEqual([
+      expect(await database.select({ key: storedSignals.key, dedupeId: storedSignals.dedupeId }).from(storedSignals)).toEqual([
         { key: 'o-1', dedupeId: 'ch_o-1' },
       ]);
 
@@ -136,7 +136,7 @@ describe('aggregates’ events', () => {
 
       await expect(placeAndPay(node, new Order('o-1'), 'the warehouse is closed')).rejects.toThrow('the warehouse is closed');
       expect(await database.select().from(orders)).toEqual([]);
-      expect(await database.select().from(workflowSignals)).toEqual([]);
+      expect(await database.select().from(storedSignals)).toEqual([]);
       expect(await node.client.list()).toEqual([]);
       expect(await node.worker.drain()).toBe(0);
     });

@@ -243,7 +243,7 @@ async function dump(): Promise<string> {
     }
 
     const rows: string[] = [];
-    for (const table of ['workflow_instances', 'workflow_journal', 'workflow_waits', 'workflow_signals', 'workflow_schedules', 'workflow_rate_limits']) {
+    for (const table of ['instances', 'journal', 'waits', 'signals', 'schedules', 'rate_limits'].map((name) => `nest_workflows.${name}`)) {
       const result = await connection.db.execute<{ row: string }>(sql.raw(`SELECT row_to_json(t)::text AS row FROM ${table} t`));
       rows.push(...result.rows.map((row) => row.row));
     }

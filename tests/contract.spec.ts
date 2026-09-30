@@ -2,15 +2,16 @@
  * The WorkflowStore contract (lib/testing/index.ts, `@nestjs/workflows/testing`) on the store
  * this run uses (support.ts, `WORKFLOWS_TEST_STORE`). The in-memory store's calls never
  * interleave (it does its work before its first await), so the concurrency cases check that it
- * survives being raced. The workflows tutorial's DrizzleWorkflowStore runs them with its
- * drizzle-kit migrations (copied into fixtures/): on PGlite one statement at a time, and on
- * PostgreSQL on a pool, where they race real connections.
+ * survives being raced. On PGlite and PostgreSQL it runs on the workflows tutorial's hand-written
+ * DrizzleWorkflowStore, with its drizzle-kit migrations (copied into fixtures/): the proof that a
+ * store of your own still works (tests/postgres/ runs it on PostgresWorkflowStore). On PGlite one
+ * statement at a time, and on PostgreSQL on a pool, where the cases race real connections.
  */
 import { DrizzleWorkflowStore } from './fixtures/database/drizzle-workflow.store.js';
 import type { Database } from './fixtures/database/drizzle.js';
 import { InMemoryWorkflowStore, WorkflowStorage, type WorkflowStore } from '../lib/index.js';
 import { workflowStoreContract } from '../lib/testing/index.js';
-import { connect, skipReason, storeKind, storeLabel, tempDb, type Connection } from './support.js';
+import { connect, skipReason, storeKind, tempDb, type Connection } from './support.js';
 
 if (storeKind === 'memory') {
   describe('InMemoryWorkflowStore', () => {
@@ -19,7 +20,7 @@ if (storeKind === 'memory') {
     }
   });
 } else {
-  describe(storeLabel, () => {
+  describe(`the hand-written DrizzleWorkflowStore on ${storeKind === 'pglite' ? 'PGlite' : 'PostgreSQL'}`, () => {
     // One connection (a pool on PostgreSQL) for every case, on emptied tables.
     let connection: Connection;
     const db = () => connection.db as Database;

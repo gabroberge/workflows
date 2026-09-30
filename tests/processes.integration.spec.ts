@@ -19,7 +19,7 @@ import {
   type WorkflowStore,
   type WorkflowWorkerOptions,
 } from '../lib/index.js';
-import { DrizzleWorkflowStore } from './fixtures/database/drizzle-workflow.store.js';
+import { PostgresWorkflowStore } from '../lib/postgres/index.js';
 import { boot, deferred, heartbeatRead, storeKind, tempDb, waitFor, World, type Node, type TestDb } from './support.js';
 
 const pickedUp = new WorkflowSignal<{ carrier: string }>('parcel.picked-up');
@@ -280,7 +280,7 @@ async function stop(node: Node) {
 }
 
 /** Every process's store is one of these: in memory they share one, on SQL each opens its own. */
-const storePrototype = (storeKind === 'memory' ? InMemoryWorkflowStore : DrizzleWorkflowStore).prototype as WorkflowStore;
+const storePrototype = (storeKind === 'memory' ? InMemoryWorkflowStore : PostgresWorkflowStore).prototype as WorkflowStore;
 
 const types = (node: Node) => node.events.map((event) => event.type);
 

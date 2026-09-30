@@ -16,11 +16,12 @@ export default defineConfig({
     globals: true,
     setupFiles: ['reflect-metadata'],
     globalSetup: ['tests/support/generate-prisma-client.ts', 'tests/support/global-setup.ts'],
-    // The engine suites and the store contract run once per store (tests/support.ts): in
-    // memory, and the tutorial's DrizzleWorkflowStore (tests/fixtures/) on PGlite and on
-    // PostgreSQL (SQL_TEST_PG_URL, else a throwaway cluster from local binaries, else skipped
-    // with the reason). tests/postgres/ is PostgresWorkflowStore's own project: its contract
-    // through every executor, transactions, migrations. `--project workflows:pglite` runs one of them.
+    // The engine suites run once per store (tests/support.ts): in memory, and PostgresWorkflowStore
+    // (@nestjs/workflows/postgres) on PGlite and on PostgreSQL (SQL_TEST_PG_URL, else a throwaway
+    // cluster from local binaries, else skipped with the reason). There, contract.spec.ts checks the
+    // tutorial's hand-written DrizzleWorkflowStore (tests/fixtures/). tests/postgres/ is
+    // PostgresWorkflowStore's own project: its contract through every executor, transactions,
+    // migrations. `--project workflows:pglite` runs one of them.
     projects: [
       {
         extends: true,
