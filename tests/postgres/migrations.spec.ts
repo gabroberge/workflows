@@ -11,6 +11,7 @@ import { drizzle } from 'drizzle-orm/pglite';
 import { migrate as drizzleMigrate } from 'drizzle-orm/pglite/migrator';
 import { PGlite } from '@electric-sql/pglite';
 import pg from 'pg';
+import type { SqlExecutor as AnySqlExecutor } from '@nestjs/store-kit';
 import { fromDrizzle, fromPg, PostgresWorkflowStore, WorkflowSchemaError, type SqlExecutor, type SqlTransaction } from '../../lib/postgres/index.js';
 import { workflowStoreSchema } from '../../lib/postgres/migrations/index.js';
 import { testDatabase } from './support.js';
@@ -247,7 +248,7 @@ describe('options', () => {
     const mysql = { dialect: 'mysql', query: executor.query.bind(executor), transaction: executor.transaction.bind(executor), wrapTransaction: executor.wrapTransaction.bind(executor) };
     // A MySQL executor is a compile error first (the options take SqlExecutor<'postgres'>), then a TypeError.
     // @ts-expect-error
-    expect(() => new PostgresWorkflowStore({ executor: mysql as SqlExecutor<'mysql'> })).toThrow(
+    expect(() => new PostgresWorkflowStore({ executor: mysql as AnySqlExecutor<'mysql'> })).toThrow(
       "PostgresWorkflowStore runs on PostgreSQL, and `executor` is a MySQL executor: import the executor from '@nestjs/workflows/postgres' (fromPg, fromDrizzle, fromTypeOrm, fromPrisma or fromKysely).",
     );
     expect(() => new PostgresWorkflowStore({ executor: fromPg(pool()), migrate: 'yes' as unknown as boolean })).toThrow(
