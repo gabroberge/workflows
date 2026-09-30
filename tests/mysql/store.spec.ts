@@ -6,10 +6,13 @@
  * - claims under a concurrency limit take the workflow's lock before counting: a claim that ran while another was
  *   leasing, and saw a new, more urgent instance, never leases past the limit (SKIP LOCKED alone lets it through: the
  *   two claims lease different rows);
- * - the kit's lock table keeps one row per lock key the store takes, a bounded few, however much work goes through it.
+ * - the kit's lock table keeps one row per lock key the store takes, a bounded few, however much work goes through it,
+ *   and the store creates the signal lock's row at startup, in a transaction of its own: had the application's
+ *   transaction created it and rolled back, the signals waiting for it would deadlock.
  */
 import { createHash } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { mysqlErrorCode } from '@nestjs/store-kit/mysql';
 import mysql from 'mysql2/promise';
 import { MySqlWorkflowStore, type SqlExecutor } from '../../lib/mysql/index.js';
 import { clients, onMysql, testDatabase, truncate, type Client } from './support.js';
@@ -92,6 +95,52 @@ describe.each(clients)('MySqlWorkflowStore through $name on MySQL', (factory) =>
     expect((await second).instances).toEqual([]);
     expect(settled).toBe('second waiting');
     expect((await store.list({ limit: 10, offset: 0 })).filter((instance) => instance.leaseUntil === FAR).map((instance) => instance.id)).toEqual(['a', 'b']);
+  });
+
+  it("lets signals waiting for one whose transaction rolls back go on, the signal lock's row created at startup", async () => {
+    const fresh = new MySqlWorkflowStore({ executor: client!.executor, schema: `${schema}_fresh` });
+    await fresh.onModuleInit();
+    const signal = (key: string) => ({ name: 's', key, dedupeId: null, payload: null, now: 1 });
+
+    // The application's transaction takes the signal lock, and rolls back while others wait for it.
+    const holding = deferred();
+    const rollBack = deferred();
+    const first = client!.transaction(async (tx) => {
+      await fresh.signalInTransaction(tx, signal('first'));
+      holding.resolve();
+      await rollBack.promise;
+      throw new Error('rolled back');
+    });
+    await holding.promise;
+    const waiting = ['a', 'b', 'c', 'd'].map((key) => client!.transaction((tx) => fresh.signalInTransaction(tx, signal(key))));
+    await sleep(300);
+    rollBack.resolve();
+
+    await expect(first).rejects.toThrow('rolled back');
+    const outcomes = await Promise.allSettled(waiting);
+    expect(outcomes.flatMap((outcome) => (outcome.status === 'rejected' ? [mysqlErrorCode(outcome.reason) ?? outcome.reason] : []))).toEqual([]);
+    expect((await fresh.signals({ name: 's', key: 'a', afterId: 0, upToId: FAR })).length).toBe(1);
+    expect((await fresh.signals({ name: 's', key: 'first', afterId: 0, upToId: FAR })).length).toBe(0);
+  });
+
+  it("starts while a signal in the application's transaction holds the signal lock, not waiting for it", async () => {
+    const holding = deferred();
+    const commit = deferred();
+    const signalling = client!.transaction(async (tx) => {
+      await store.signalInTransaction(tx, { name: 's', key: 'held', dedupeId: null, payload: null, now: 1 });
+      holding.resolve();
+      await commit.promise;
+    });
+    await holding.promise;
+    try {
+      // Another process starts on the same schema: its lock row is there, and only noted.
+      const starting = new MySqlWorkflowStore({ executor: client!.executor, schema, migrate: false });
+      const started = await Promise.race([starting.onModuleInit().then(() => 'started'), sleep(1_000).then(() => 'waiting')]);
+      expect(started).toBe('started');
+    } finally {
+      commit.resolve();
+      await signalling;
+    }
   });
 
   it('keeps one lock row per lock key: the signals lock, and a concurrency lock per workflow with a limit', async () => {

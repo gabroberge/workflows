@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { Logger, type OnModuleInit } from '@nestjs/common';
 import {
   columns,
@@ -56,6 +57,9 @@ const DUPLICATE_KEY = 1062;
  * slip between a suspension's check for missed signals and its commit.
  */
 const SIGNALS_LOCK = 'signals';
+
+/** The lock a claim of `workflow` takes while it counts the slots of its concurrency limit. */
+const concurrencyLock = (workflow: string) => `concurrency:${workflow}`;
 
 const RUNNABLE = `(${RUNNABLE_STATUSES.map((status) => `'${status}'`).join(', ')})`;
 const CANCELLABLE = `(${CANCELLABLE_STATUSES.map((status) => `'${status}'`).join(', ')})`;
@@ -149,9 +153,11 @@ export class MySqlWorkflowStore implements WorkflowStore, OnModuleInit {
   private readonly logger = new Logger('WorkflowsModule');
   private readonly executor: SqlExecutor;
   private readonly schema: string;
-  private readonly t: Record<'instances' | 'journal' | 'waits' | 'signals' | 'schedules' | 'rateLimits', string>;
+  private readonly t: Record<'instances' | 'journal' | 'waits' | 'signals' | 'schedules' | 'rateLimits' | 'locks', string>;
   /** The server and the schema checked, and the schema migrated (`migrate`), before the first statement. */
   private readonly readiness: StoreReadiness;
+  /** The lock keys whose rows this store created, or found (see `createLockRows()`). */
+  private readonly lockRows = new Set<string>();
 
   constructor(options: MySqlWorkflowStoreOptions, storage?: WorkflowStorage) {
     const resolved = mysqlWorkflowStoreSchema.resolveOptions(options);
@@ -165,14 +171,19 @@ export class MySqlWorkflowStore implements WorkflowStore, OnModuleInit {
       signals: t('signals'),
       schedules: t('schedules'),
       rateLimits: t('rate_limits'),
+      // The kit's lock table (lockKeys()), whose name quoteTable() keeps for the kit: the schema is checked above.
+      locks: `\`${this.schema}_locks\``,
     };
     this.readiness = mysqlWorkflowStoreSchema.readiness({ ...resolved, logger: this.logger });
     storage?.registerSource(this);
   }
 
-  /** Checks the server and migrates the schema (`migrate`) or checks it, before the worker starts: startup fails if it can't serve. */
+  /**
+   * Checks the server and migrates the schema (`migrate`) or checks it, before the worker starts: startup fails if it
+   * can't serve. Then creates the signal lock's row (see `createLockRows()`).
+   */
   async onModuleInit(): Promise<void> {
-    await this.readiness.ready();
+    await this.ready();
   }
 
   /**
@@ -187,7 +198,7 @@ export class MySqlWorkflowStore implements WorkflowStore, OnModuleInit {
   // ---------------------------------------------------------------- instances
 
   async create(instance: NewWorkflowInstance): Promise<{ instance: WorkflowInstance; created: boolean }> {
-    await this.readiness.ready();
+    await this.ready();
     checkInstance(instance);
     return retryOnDeadlock(this.executor, (tx) => this.insertInstance(tx, instance));
   }
@@ -201,7 +212,7 @@ export class MySqlWorkflowStore implements WorkflowStore, OnModuleInit {
   }
 
   async get(id: string, options: { journal?: boolean } = {}): Promise<WorkflowInstanceDetails | null> {
-    await this.readiness.ready();
+    await this.ready();
     // One statement, one snapshot. JSON_ARRAYAGG() takes no ORDER BY: the positions and sequence numbers come along.
     const journal = options.journal
       ? `,
@@ -232,7 +243,7 @@ WHERE i.id = ${p.text(id)}`,
   }
 
   async list(query: WorkflowListQuery): Promise<WorkflowInstance[]> {
-    await this.readiness.ready();
+    await this.ready();
     const p = new SqlParams();
     const where = [
       ...(query.status ? [p.in('i.status', query.status)] : []),
@@ -250,7 +261,7 @@ ORDER BY i.created_at, i.id LIMIT ${p.limit(query.limit)} OFFSET ${p.limit(query
   }
 
   async requestCancel(id: string, { reason, now, terminate }: WorkflowCancelRequest): Promise<boolean> {
-    await this.readiness.ready();
+    await this.ready();
     // A terminate also stops a compensating instance, and follows a cancel. One conditional update by primary key: of
     // two concurrent requests, the second waits for the first's row and finds it changed.
     const applies = terminate ? `status IN ${RUNNABLE} AND NOT terminate_requested` : `status IN ${CANCELLABLE} AND NOT cancel_requested`;
@@ -267,7 +278,7 @@ WHERE id = ${p.text(id)} AND ${applies}`,
 
   /** `WorkflowClient.retry()`: one conditional update, then the journal, in one transaction. */
   async reopen(id: string, reopen: WorkflowReopen): Promise<boolean> {
-    await this.readiness.ready();
+    await this.ready();
     checkEntries(reopen.entries);
     return retryOnDeadlock(this.executor, async (tx) => {
       // The update locks the row; of two concurrent retries, the second waits for it and finds it changed.
@@ -291,7 +302,7 @@ WHERE id = ${p.text(id)} AND lease_token IS NULL AND status = ${p.text(reopen.ex
 
   /** `WorkflowClient.delete()`: its journal and waits go with it, in the same transaction. */
   async delete(id: string, statuses: WorkflowStatus[]): Promise<boolean> {
-    await this.readiness.ready();
+    await this.ready();
     return retryOnDeadlock(this.executor, async (tx) => {
       // Shared, before the row: a signal in the application's REPEATABLE READ transaction locks the waits it reads, then
       // the instances it wakes, so this delete, which locks the instance, then its waits, waits for it first.
@@ -310,7 +321,7 @@ WHERE id = ${p.text(id)} AND lease_token IS NULL AND status = ${p.text(reopen.ex
   // ---------------------------------------------------------------- signals
 
   async signal(signal: NewWorkflowSignal): Promise<WorkflowSignalResult> {
-    await this.readiness.ready();
+    await this.ready();
     checkSignal(signal);
     return retryOnDeadlock(this.executor, (tx) => this.insertSignal(tx, signal));
   }
@@ -327,7 +338,7 @@ WHERE id = ${p.text(id)} AND lease_token IS NULL AND status = ${p.text(reopen.ex
   }
 
   async signals(query: WorkflowSignalQuery): Promise<WorkflowSignalRecord[]> {
-    await this.readiness.ready();
+    await this.ready();
     const p = new SqlParams();
     const rows = await this.executor.query<Row>(
       `SELECT ${columns(SIGNAL_COLUMNS, 's')} FROM ${this.t.signals} s
@@ -341,7 +352,7 @@ ORDER BY s.id`,
   // ---------------------------------------------------------------- retention
 
   async purge(query: WorkflowPurgeQuery): Promise<WorkflowPurgeResult> {
-    await this.readiness.ready();
+    await this.ready();
     const finished = (p: SqlParams) => `${p.in('i.status', query.statuses)} AND i.updated_at < ${p.bigint(query.before)}`;
 
     // Instances, oldest first: candidates by a consistent read, then those still finished locked (the condition again:
@@ -439,7 +450,7 @@ FOR UPDATE SKIP LOCKED`,
   // ---------------------------------------------------------------- schedules
 
   async saveSchedule(save: WorkflowScheduleSave): Promise<WorkflowScheduleRecord | null> {
-    await this.readiness.ready();
+    await this.ready();
     checkKey('a schedule id', save.id, L.scheduleId);
     checkKey("a workflow's name", save.workflow, L.workflow);
     return retryOnDeadlock(this.executor, async (tx) => {
@@ -478,12 +489,12 @@ WHERE id = ${p.text(save.id)} AND revision = ${p.int(save.expectRevision)}`,
   }
 
   async getSchedule(id: string): Promise<WorkflowScheduleRecord | null> {
-    await this.readiness.ready();
+    await this.ready();
     return this.readSchedule(this.executor, id);
   }
 
   async listSchedules(query: WorkflowScheduleQuery): Promise<WorkflowScheduleRecord[]> {
-    await this.readiness.ready();
+    await this.ready();
     const p = new SqlParams();
     const where = [
       ...(query.workflow !== undefined ? [`s.workflow = ${p.text(query.workflow)}`] : []),
@@ -498,7 +509,7 @@ ORDER BY s.id LIMIT ${p.limit(query.limit)} OFFSET ${p.limit(query.offset)}`,
   }
 
   async deleteSchedule(id: string, revision?: number): Promise<boolean> {
-    await this.readiness.ready();
+    await this.ready();
     const p = new SqlParams();
     const { affectedRows } = await this.executor.execute(
       `DELETE FROM ${this.t.schedules} WHERE id = ${p.text(id)}${revision !== undefined ? ` AND revision = ${p.int(revision)}` : ''}`,
@@ -508,7 +519,7 @@ ORDER BY s.id LIMIT ${p.limit(query.limit)} OFFSET ${p.limit(query.offset)}`,
   }
 
   async claimSchedules(request: WorkflowScheduleClaimRequest): Promise<WorkflowScheduleRecord[]> {
-    await this.readiness.ready();
+    await this.ready();
     checkKey('a lease token', request.token, L.leaseToken);
     return retryOnDeadlock(this.executor, async (tx) => {
       const due = (p: SqlParams) =>
@@ -531,7 +542,7 @@ WHERE ${p.in('id', ids)}`,
   }
 
   async writeSchedule(id: string, token: string, write: WorkflowScheduleWrite): Promise<boolean> {
-    await this.readiness.ready();
+    await this.ready();
     const p = new SqlParams();
     const { affectedRows } = await this.executor.execute(
       `UPDATE ${this.t.schedules}
@@ -545,8 +556,9 @@ WHERE id = ${p.text(id)} AND lease_token = ${p.text(token)}`,
   // ---------------------------------------------------------------- the worker
 
   async claim(request: WorkflowClaimRequest): Promise<WorkflowClaim> {
-    await this.readiness.ready();
+    await this.ready();
     checkKey('a lease token', request.token, L.leaseToken);
+    await this.createLockRows((request.limits ?? []).map((limit) => concurrencyLock(limit.workflow)));
     return retryOnDeadlock(this.executor, async (tx) => {
       if (request.limits?.length || request.rateLimits?.length) {
         return this.claimWithin(tx, request);
@@ -570,7 +582,7 @@ WHERE id = ${p.text(id)} AND lease_token = ${p.text(token)}`,
     await lockKeys(
       tx,
       this.schema,
-      limits.map((limit) => `concurrency:${limit.workflow}`),
+      limits.map((limit) => concurrencyLock(limit.workflow)),
     );
 
     // Candidates with no room at all are passed over; then each concurrency key's first, as many as its free slots; of
@@ -764,7 +776,7 @@ WHERE ${p.in('id', ids)}`,
   }
 
   async renew(id: string, token: string, leaseUntil: number): Promise<{ cancelRequested: boolean; terminateRequested: boolean } | null> {
-    await this.readiness.ready();
+    await this.ready();
     // The fence: the rows the update matched (it matches the lease holder's row even when it writes the value the row
     // has, a manual clock's extension). The flags, read right after, are the instance's latest.
     const p = new SqlParams();
@@ -782,7 +794,7 @@ WHERE ${p.in('id', ids)}`,
   }
 
   async write(id: string, token: string, write: WorkflowWrite): Promise<boolean> {
-    await this.readiness.ready();
+    await this.ready();
     checkEntries(write.entries);
     if (write.signal) {
       checkSignal(write.signal);
@@ -842,6 +854,46 @@ WHERE ${p.in('id', ids)}`,
   }
 
   // ---------------------------------------------------------------- internals
+
+  /** The store's readiness (the server and the schema), then the signal lock's row: before its own first statement. */
+  private async ready(): Promise<void> {
+    await this.readiness.ready();
+    await this.createLockRows([SIGNALS_LOCK]);
+  }
+
+  /**
+   * Creates the rows of lock keys (the kit's `<schema>_locks`, one per key, never deleted) in a transaction of the
+   * store's own, which commits, before any transaction takes those locks. When the transaction that created a lock's
+   * row rolls back, MySQL hands the transactions waiting for that row one another's locks, and they deadlock (1213): so
+   * a lock's first use, which may be in the application's transaction (`signal(..., { transaction })`) or in one that
+   * fails, never creates its row. The store's lock keys are few: `signals`, and a concurrency lock per workflow with a
+   * limit. (A store first called inside the application's transaction, before `onModuleInit()` or any call outside
+   * one, creates the signal lock's row there.)
+   */
+  private async createLockRows(keys: readonly string[]): Promise<void> {
+    let missing = keys.filter((key) => !this.lockRows.has(key));
+    if (missing.length === 0) {
+      return;
+    }
+
+    // The rows there already are only noted, by a read that takes no lock: taking one would wait for the transactions
+    // that hold it (a signal in the application's transaction), and hold a process's startup up behind them. A row's
+    // id is its key's SHA-256, as lockKeys() writes it.
+    const ids = new Map(missing.map((key) => [createHash('sha256').update(key).digest('hex'), key]));
+    const p = new SqlParams();
+    for (const row of await this.executor.query<Row>(`SELECT CAST(id AS CHAR) AS id FROM ${this.t.locks} WHERE ${p.in('id', [...ids.keys()])}`, p.values)) {
+      this.lockRows.add(ids.get(row.id!)!);
+    }
+    missing = missing.filter((key) => !this.lockRows.has(key));
+    if (missing.length === 0) {
+      return;
+    }
+
+    await retryOnDeadlock(this.executor, (tx) => lockKeys(tx, this.schema, missing));
+    for (const key of missing) {
+      this.lockRows.add(key);
+    }
+  }
 
   private async insertInstance(tx: SqlTransaction, i: NewWorkflowInstance): Promise<{ instance: WorkflowInstance; created: boolean }> {
     // An instance deleted between the insert that met it and the read of it is created again.
