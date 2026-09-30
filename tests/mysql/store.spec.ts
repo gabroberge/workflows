@@ -11,9 +11,8 @@
  *   and the store creates the signal lock's row at startup, in a transaction of its own: had the application's
  *   transaction created it and rolled back, the signals waiting for it would deadlock.
  */
-import { createHash } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { mysqlErrorCode } from '@nestjs/store-kit/mysql';
+import { lockRowId, mysqlErrorCode } from '@nestjs/store-kit/mysql';
 import mysql from 'mysql2/promise';
 import { MySqlWorkflowStore, type SqlExecutor } from '../../lib/mysql/index.js';
 import { clients, onMysql, testDatabase, truncate, type Client } from './support.js';
@@ -194,9 +193,8 @@ describe.each(clients)('MySqlWorkflowStore through $name on MySQL', (factory) =>
     expect(await store.delete('i0', ['suspended', 'pending'])).toBe(true);
     await store.purge({ statuses: ['completed'], before: FAR, limit: 100 });
 
-    const sha = (key: string) => createHash('sha256').update(key).digest('hex');
     const rows = (await admin(`SELECT id FROM ${schema}_locks ORDER BY id`)).map((row) => row.id);
-    expect(rows).toEqual(['signals', 'concurrency:w1', 'concurrency:w2', 'concurrency:w3'].map(sha).sort());
+    expect(rows).toEqual(['signals', 'concurrency:w1', 'concurrency:w2', 'concurrency:w3'].map(lockRowId).sort());
   });
 });
 

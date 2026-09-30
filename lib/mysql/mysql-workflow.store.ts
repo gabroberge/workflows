@@ -1,7 +1,7 @@
-import { createHash } from 'node:crypto';
 import { Logger, type OnModuleInit } from '@nestjs/common';
 import {
   columns,
+  ensureLockRows,
   keyColumn,
   lockKeys,
   mysqlErrorCode,
@@ -150,7 +150,7 @@ export class MySqlWorkflowStore implements WorkflowStore, OnModuleInit {
   private readonly logger = new Logger('WorkflowsModule');
   private readonly executor: SqlExecutor;
   private readonly schema: string;
-  private readonly t: Record<'instances' | 'journal' | 'waits' | 'signals' | 'schedules' | 'rateLimits' | 'locks', string>;
+  private readonly t: Record<'instances' | 'journal' | 'waits' | 'signals' | 'schedules' | 'rateLimits', string>;
   /** The server and the schema checked, and the schema migrated (`migrate`), before the first statement. */
   private readonly readiness: StoreReadiness;
   /** The lock keys whose rows this store created, or found (see `createLockRows()`). */
@@ -168,8 +168,6 @@ export class MySqlWorkflowStore implements WorkflowStore, OnModuleInit {
       signals: t('signals'),
       schedules: t('schedules'),
       rateLimits: t('rate_limits'),
-      // The kit's lock table (lockKeys()), whose name quoteTable() keeps for the kit: the schema is checked above.
-      locks: `\`${this.schema}_locks\``,
     };
     this.readiness = mysqlWorkflowStoreSchema.readiness({ ...resolved, logger: this.logger });
     storage?.registerSource(this);
@@ -870,34 +868,23 @@ WHERE ${p.in('id', ids)}`,
   }
 
   /**
-   * Creates the rows of lock keys (the kit's `<schema>_locks`, one per key, never deleted) in a transaction of the
-   * store's own, which commits, before any transaction takes those locks. When the transaction that created a lock's
-   * row rolls back, MySQL hands the transactions waiting for that row one another's locks, and they deadlock (1213): so
-   * a lock's first use, which may be in the application's transaction (`signal(..., { transaction })`) or in one that
-   * fails, never creates its row. The store's lock keys are few: `signals`, and a concurrency lock per workflow with a
-   * limit. (A store first called inside the application's transaction, before `onModuleInit()` or any call outside
-   * one, creates the signal lock's row there.)
+   * Creates the rows of lock keys (the kit's `<schema>_locks`, one per key, never deleted) ahead of time, with the kit's
+   * `ensureLockRows()`: in transactions of their own, which commit before any transaction takes those locks. When the
+   * transaction that created a lock's row rolls back, MySQL makes the transactions waiting for that row deadlock
+   * (1213): so a lock's first use, which may be in the application's transaction (`signal(..., { transaction })`) or in
+   * one that fails, never creates its row. The rows there already are only noted, by a read that takes no lock: a
+   * process's startup never waits behind the transactions holding them (a signal in the application's transaction).
+   * The store's lock keys are few: `signals`, and a concurrency lock per workflow with a limit. (A store first called
+   * inside the application's transaction, before `onModuleInit()` or any call outside one, creates the signal lock's row
+   * there.)
    */
   private async createLockRows(keys: readonly string[]): Promise<void> {
-    let missing = keys.filter((key) => !this.lockRows.has(key));
+    const missing = keys.filter((key) => !this.lockRows.has(key));
     if (missing.length === 0) {
       return;
     }
 
-    // The rows there already are only noted, by a read that takes no lock: taking one would wait for the transactions
-    // that hold it (a signal in the application's transaction), and hold a process's startup up behind them. A row's
-    // id is its key's SHA-256, as lockKeys() writes it.
-    const ids = new Map(missing.map((key) => [createHash('sha256').update(key).digest('hex'), key]));
-    const p = new SqlParams();
-    for (const row of await this.executor.query<Row>(`SELECT CAST(id AS CHAR) AS id FROM ${this.t.locks} WHERE ${p.in('id', [...ids.keys()])}`, p.values)) {
-      this.lockRows.add(ids.get(row.id!)!);
-    }
-    missing = missing.filter((key) => !this.lockRows.has(key));
-    if (missing.length === 0) {
-      return;
-    }
-
-    await retryOnDeadlock(this.executor, (tx) => lockKeys(tx, this.schema, missing));
+    await ensureLockRows(this.executor, this.schema, missing);
     for (const key of missing) {
       this.lockRows.add(key);
     }
