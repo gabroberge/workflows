@@ -35,7 +35,8 @@ describe('nest-workflows, for MySqlWorkflowStore', () => {
 
   it('lists both stores and both kinds of URL in its usage', async () => {
     const help = await run(['--help']);
-    expect(help.out).toContain("PostgresWorkflowStore's schema (@nestjs/workflows/postgres):\nMySqlWorkflowStore's schema (@nestjs/workflows/mysql):");
+    // One line names both stores, over the commands.
+    expect(help.out).toContain("\n\nPostgresWorkflowStore's schema (@nestjs/workflows/postgres) or MySqlWorkflowStore's (@nestjs/workflows/mysql):\n\n  migrate   ");
     expect(help.out).toContain('--url <url>        The database (postgres://... or mysql://...). Default: $DATABASE_URL');
   });
 
