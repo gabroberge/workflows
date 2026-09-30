@@ -103,8 +103,9 @@ it('starts at most max executions per window, resumptions included, the window o
     await node.client.start(SyncWorkflow, { id }, { id });
   }
 
+  // One claim leases both, and they run at once: their steps, in either order.
   await node.worker.drain();
-  expect(calls('pull')).toEqual(['s-1', 's-2']);
+  expect(calls('pull').sort()).toEqual(['s-1', 's-2']);
   expect(await node.client.getStatus('s-3')).toMatchObject({ status: 'pending', runs: 0 });
 
   // s-1 and s-2 wake from their naps, but the window (t0 to t0+1m) is full.
@@ -114,7 +115,7 @@ it('starts at most max executions per window, resumptions included, the window o
   // A new window at t0+1m: s-3 has waited longest, then s-1; s-2 waits for the next window.
   clock.advance('30s');
   expect(await node.worker.drain()).toBe(2);
-  expect(calls('pull')).toEqual(['s-1', 's-2', 's-3']);
+  expect(calls('pull').slice(2)).toEqual(['s-3']);
   expect(calls('push')).toEqual(['s-1']);
 
   clock.advance('1m');
