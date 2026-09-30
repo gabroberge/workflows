@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { Inject, Injectable, type BeforeApplicationShutdown, type Type } from '@nestjs/common';
-import { systemClock } from '../utils/clock.util.js';
-import { runTimeoutMs, toMs } from '../utils/duration.util.js';
+import { systemClock } from '../core/time/clock.js';
+import { parseDuration } from '../core/time/duration.js';
+import { runTimeoutMs } from '../utils/run-timeout.util.js';
 import type { WorkflowClock } from '../interfaces/workflow-clock.interface.js';
 import { WorkflowIdConflictError } from '../errors/workflow-id-conflict.error.js';
 import { WorkflowNotFoundError } from '../errors/workflow-not-found.error.js';
@@ -163,7 +164,7 @@ export class WorkflowClient implements BeforeApplicationShutdown {
    * second).
    */
   async result<O = unknown>(id: string, options: WorkflowResultOptions = {}): Promise<Journaled<O>> {
-    const timeoutMs = options.timeout === undefined ? Infinity : toMs(options.timeout);
+    const timeoutMs = options.timeout === undefined ? Infinity : parseDuration(options.timeout);
     const deadline = performance.now() + timeoutMs;
     options.signal?.throwIfAborted();
 
@@ -478,7 +479,7 @@ export class WorkflowClient implements BeforeApplicationShutdown {
    * concurrent runs are safe, only wasteful.
    */
   async purge(options: WorkflowPurgeOptions): Promise<WorkflowPurgeResult> {
-    const olderThan = toMs(options.olderThan);
+    const olderThan = parseDuration(options.olderThan);
     const statuses = options.status === undefined ? DEFAULT_PURGE : Array.isArray(options.status) ? options.status : [options.status];
     const unfinished = statuses.filter((status) => !FINISHED.includes(status));
     if (statuses.length === 0 || unfinished.length > 0) {

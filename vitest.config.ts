@@ -37,11 +37,13 @@ export default defineConfig({
         test: {
           name: `workflows:${store}`,
           include: ['tests/**/*.spec.ts'],
-          // The registry's own tests don't touch a store, nor do the time-zone, cron and RRULE ones, and the
-          // CQRS checks and routing run on the in-memory store (cqrs.integration.spec.ts covers the SQL stores).
+          // The registry's own tests don't touch a store, nor do the time-zone, cron and RRULE ones, nor the core's
+          // (tests/core/: tests/postgres/ runs its PostgreSQL parts), and the CQRS checks and routing run on the
+          // in-memory store (cqrs.integration.spec.ts covers the SQL stores).
           exclude: [
             ...configDefaults.exclude,
             'tests/postgres/**',
+            'tests/core/**',
             'tests/storage.spec.ts',
             'tests/cqrs.spec.ts',
             'tests/time-zone.spec.ts',

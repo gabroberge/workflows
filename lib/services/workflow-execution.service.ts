@@ -3,7 +3,7 @@ import { Logger, type Type } from '@nestjs/common';
 import { createHash, randomUUID } from 'node:crypto';
 import { setImmediate as nextMacrotask } from 'node:timers/promises';
 import type { WorkflowClock } from '../interfaces/workflow-clock.interface.js';
-import { toMs, type Duration } from '../utils/duration.util.js';
+import { parseDuration, type Duration } from '../core/time/duration.js';
 import { WorkflowNonDeterminismError } from '../errors/workflow-non-determinism.error.js';
 import { WorkflowDefinitionError } from '../errors/workflow-definition.error.js';
 import { StepTimeoutError } from '../errors/step-timeout.error.js';
@@ -42,7 +42,8 @@ import { WorkflowIdConflictError } from '../errors/workflow-id-conflict.error.js
 import { CHILD_ENDED_SIGNAL } from '../workflows.constants.js';
 import { newInstance } from '../utils/new-instance.util.js';
 import type { WorkflowRetryOptions } from '../interfaces/workflow-retry-options.interface.js';
-import { resolveRetry, retryDelay, type ResolvedRetry } from '../utils/retry.util.js';
+import { nextRetry, resolveRetry } from '../core/retries/retry.js';
+import type { ResolvedRetry } from '../core/interfaces/retry-settings.interface.js';
 import { entryBytes } from '../utils/journal-limits.util.js';
 import { canonical } from '../utils/canonical.util.js';
 import { normalize } from '../utils/normalize.util.js';
@@ -545,7 +546,7 @@ export class WorkflowExecution {
     const deadline = entry
       ? (entry.wakeAt ?? null)
       : options.timeout !== undefined
-        ? this.deps.clock.now() + toMs(options.timeout)
+        ? this.deps.clock.now() + parseDuration(options.timeout)
         : null;
     if (!entry) {
       this.stage({ name, kind: 'signal', status: 'pending', attempts: 0, wakeAt: deadline, data: wait });
@@ -875,8 +876,8 @@ export class WorkflowExecution {
     try {
       return {
         policy: resolveRetry(options.retry, this.deps.defaultRetry),
-        timeoutMs: options.timeout === undefined ? undefined : toMs(options.timeout),
-        heartbeatTimeoutMs: options.heartbeatTimeout === undefined ? undefined : toMs(options.heartbeatTimeout),
+        timeoutMs: options.timeout === undefined ? undefined : parseDuration(options.timeout),
+        heartbeatTimeoutMs: options.heartbeatTimeout === undefined ? undefined : parseDuration(options.heartbeatTimeout),
       };
     } catch (error) {
       throw new TypeError(`Invalid options for "${name}": ${(error as Error).message}`);
@@ -950,15 +951,14 @@ export class WorkflowExecution {
 
       let serialized = serializeError(error);
       let retryAt: number | null = null;
-      if (!(error instanceof NonRetryableStepError) && attempt < policy.attempts) {
-        try {
-          if (policy.retryIf?.(error, attempt) ?? true) {
-            retryAt = this.deps.clock.now() + retryDelay(policy, attempt, error);
-          }
-        } catch (callbackError) {
+      if (!(error instanceof NonRetryableStepError)) {
+        const next = nextRetry(policy, attempt, error);
+        if (next.retry) {
+          retryAt = this.deps.clock.now() + next.delay;
+        } else if (next.reason === 'threw') {
           // A throwing retryIf or backoff gives up, journaled like any failure,
           // so a replay sees the same StepFailedError instead of re-running the step.
-          const thrown = serializeError(callbackError);
+          const thrown = serializeError(next.error);
           serialized = {
             ...thrown,
             message: `The retry options of "${name}" threw ${thrown.name}: ${thrown.message} (handling ${serialized.name}: ${serialized.message})`,
@@ -1379,7 +1379,7 @@ function unlessCancelled(entry: WorkflowJournalEntry | undefined): WorkflowJourn
 
 function wakeTime(name: string, when: Duration | { until: Date | number }, now: number): number {
   if (typeof when !== 'object') {
-    return now + toMs(when);
+    return now + parseDuration(when);
   }
 
   const until = when.until instanceof Date ? when.until.getTime() : when.until;

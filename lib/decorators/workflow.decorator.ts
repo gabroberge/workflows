@@ -1,5 +1,6 @@
 import { applyDecorators, Injectable, SetMetadata } from '@nestjs/common';
-import { runTimeoutMs, toMs } from '../utils/duration.util.js';
+import { parseDuration } from '../core/time/duration.js';
+import { runTimeoutMs } from '../utils/run-timeout.util.js';
 import { normalize } from '../utils/normalize.util.js';
 import { SCHEDULE_ID, scheduleSpec } from '../utils/schedule-spec.util.js';
 import { WORKFLOW_METADATA } from '../workflows.constants.js';
@@ -106,7 +107,7 @@ function rateLimitOf(name: string, rateLimit: WorkflowRateLimit | WorkflowRateLi
     }
     let ms: number;
     try {
-      ms = toMs(duration);
+      ms = parseDuration(duration);
     } catch {
       ms = 0;
     }

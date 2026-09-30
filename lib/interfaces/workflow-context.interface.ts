@@ -1,5 +1,5 @@
 import type { Type } from '@nestjs/common';
-import type { Duration } from '../utils/duration.util.js';
+import type { Duration } from '../core/time/duration.js';
 import type { WorkflowParentClose } from './workflow-instance.interface.js';
 import type { WorkflowInput, WorkflowOutput } from './workflow-runner.interface.js';
 import type { SerializedWorkflowError } from './serialized-workflow-error.interface.js';

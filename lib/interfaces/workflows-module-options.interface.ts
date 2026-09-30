@@ -1,7 +1,7 @@
 import type { ConfigurableModuleAsyncOptions, Type } from '@nestjs/common';
 import type { WorkflowPayloadCodec } from './workflow-payload-codec.interface.js';
 import type { WorkflowClock } from './workflow-clock.interface.js';
-import type { Duration } from '../utils/duration.util.js';
+import type { Duration } from '../core/time/duration.js';
 import type { WorkflowRetryOptions } from './workflow-retry-options.interface.js';
 
 export interface WorkflowWorkerOptions {

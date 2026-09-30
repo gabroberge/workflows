@@ -1,4 +1,13 @@
-/** Milliseconds, or a string such as `"250ms"`, `"30s"`, `"15m"`, `"6h"`, `"3d"`, `"1w"`. */
+/**
+ * Milliseconds, or a string such as `"250ms"`, `"30s"`, `"15m"`, `"6h"`, `"3d"`, `"1w"`: the family's type for every
+ * time-valued option.
+ *
+ * ```ts
+ * interface JobOptions {
+ *   timeout?: Duration; // '2m', or 120_000
+ * }
+ * ```
+ */
 export type Duration = number | `${number}${'ms' | 's' | 'm' | 'h' | 'd' | 'w'}`;
 
 const UNITS: Record<string, number> = {
@@ -10,7 +19,16 @@ const UNITS: Record<string, number> = {
   w: 604_800_000,
 };
 
-export function toMs(duration: Duration): number {
+/**
+ * A `Duration` in milliseconds (a string's rounded to a whole one). Throws a `TypeError` for a negative or
+ * non-finite number, or a string it can't read.
+ *
+ * ```ts
+ * parseDuration('15m'); // 900_000
+ * parseDuration(250); // 250
+ * ```
+ */
+export function parseDuration(duration: Duration): number {
   if (typeof duration === 'number') {
     if (!Number.isFinite(duration) || duration < 0) {
       throw new TypeError(`Invalid duration ${duration}. Use a non-negative number of milliseconds.`);
@@ -24,19 +42,4 @@ export function toMs(duration: Duration): number {
   }
 
   return Math.round(Number(match[1]) * UNITS[match[2]]);
-}
-
-/** A workflow's run timeout in milliseconds: a zero one would time out before the first step. */
-export function runTimeoutMs(timeout: Duration, owner: string): number {
-  let ms: number;
-  try {
-    ms = toMs(timeout);
-  } catch {
-    ms = 0;
-  }
-
-  if (ms <= 0) {
-    throw new TypeError(`Invalid timeout ${JSON.stringify(timeout)} for ${owner}. Use a positive duration, such as "30d".`);
-  }
-  return ms;
 }

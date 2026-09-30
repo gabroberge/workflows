@@ -1,0 +1,11 @@
+// The `@nestjs/workflows/core` entry: the engine's storage-agnostic pieces, for building packages on them (a queue,
+// say) so they behave and read like workflows. Applications import `@nestjs/workflows`; nothing here is needed to
+// write or run workflows. Nothing here imports a driver.
+
+// Time: durations, and the clock every timestamp comes from
+export { ManualClock, parseDuration, systemClock, type Duration } from './time/index.js';
+export type { Clock } from './interfaces/index.js';
+
+// Retries: the family's retry settings, resolved, and whether and when to retry after a failure
+export { backoffDelay, nextRetry, resolveRetry, type RetryDecision } from './retries/index.js';
+export type { BackoffSettings, ResolvedBackoff, ResolvedRetry, RetrySettings } from './interfaces/index.js';

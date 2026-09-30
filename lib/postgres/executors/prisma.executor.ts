@@ -1,5 +1,5 @@
 import type { SqlExecutor, SqlTransaction, SqlTransactionOptions } from '../interfaces/sql-executor.interface.js';
-import { toMs, type Duration } from '../../utils/duration.util.js';
+import { parseDuration, type Duration } from '../../core/time/duration.js';
 import { describeValue, hasMethod, isolationSql } from '../utils/executor.util.js';
 
 /** The part of a Prisma client (or of the transaction client `$transaction()` hands its callback) the executor uses. */
@@ -54,7 +54,7 @@ export function fromPrisma(prisma: PrismaRootClientLike, options: PrismaExecutor
         : `fromPrisma() takes a Prisma client, got ${describeValue(prisma)}.`,
     );
   }
-  return new PrismaExecutor(prisma, { maxWait: toMs(options.maxWait ?? '10s'), timeout: toMs(options.timeout ?? '1m') });
+  return new PrismaExecutor(prisma, { maxWait: parseDuration(options.maxWait ?? '10s'), timeout: parseDuration(options.timeout ?? '1m') });
 }
 
 class PrismaExecutor implements SqlExecutor {

@@ -30,7 +30,7 @@ export type {
   WorkflowStepContext,
   WorkflowStepOptions,
 } from './interfaces/index.js';
-export type { Duration } from './utils/index.js';
+export type { Duration } from './core/time/index.js';
 
 // Starting, signalling, inspecting and cancelling instances, and the schedules that start them
 export { WorkflowClient, WorkflowSchedules } from './services/index.js';
@@ -147,6 +147,6 @@ export type { WorkflowPayloadCodec, WorkflowPayloadContext } from './interfaces/
 
 // Testing: a clock that only moves when told to, and `WorkflowWorker.drain()` to run due
 // instances now (with the contract suite in `@nestjs/workflows/testing`)
-export { ManualWorkflowClock } from './utils/index.js';
+export { ManualClock as ManualWorkflowClock } from './core/time/index.js';
 export type { WorkflowClock } from './interfaces/index.js';
 export { WorkflowWorker } from './services/index.js';

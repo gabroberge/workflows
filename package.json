@@ -32,6 +32,11 @@
       "import": "./dist/postgres/index.js",
       "default": "./dist/postgres/index.js"
     },
+    "./core": {
+      "types": "./dist/core/index.d.ts",
+      "import": "./dist/core/index.js",
+      "default": "./dist/core/index.js"
+    },
     "./package.json": "./package.json"
   },
   "engines": {

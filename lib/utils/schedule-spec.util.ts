@@ -6,7 +6,7 @@ import type {
 } from '../interfaces/workflow-schedule.interface.js';
 import { canonical } from './canonical.util.js';
 import { cronOccurrences, parseCron, type CronExpression } from './cron.util.js';
-import { toMs } from './duration.util.js';
+import { parseDuration } from '../core/time/duration.js';
 import { MAX_PRIORITY } from './new-instance.util.js';
 import { parseRRule, rruleCounts, rruleOccurrences, type RRule } from './rrule.util.js';
 import { assertTimeZone } from './time-zone.util.js';
@@ -70,7 +70,7 @@ export function scheduleSpec(
   } else if (options.every !== undefined) {
     let every: number;
     try {
-      every = toMs(options.every);
+      every = parseDuration(options.every);
     } catch (error) {
       throw new TypeError(`${owner}: ${(error as Error).message}`);
     }

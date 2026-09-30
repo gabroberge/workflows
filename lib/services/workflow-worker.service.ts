@@ -8,14 +8,14 @@ import {
   type OnApplicationShutdown,
   type OnModuleDestroy,
 } from '@nestjs/common';
-import { systemClock } from '../utils/clock.util.js';
+import { systemClock } from '../core/time/clock.js';
 import type { WorkflowClock } from '../interfaces/workflow-clock.interface.js';
-import { toMs } from '../utils/duration.util.js';
+import { parseDuration } from '../core/time/duration.js';
 import { WorkflowNonDeterminismError } from '../errors/workflow-non-determinism.error.js';
 import { isWorkflowInterrupt } from '../errors/workflow-interrupt.error.js';
 import { serializeError } from '../utils/serialize-error.util.js';
 import type { SerializedWorkflowError } from '../interfaces/serialized-workflow-error.interface.js';
-import { DEFAULT_RETRY, resolveRetry } from '../utils/retry.util.js';
+import { resolveRetry } from '../core/retries/retry.js';
 import { resolveJournalLimits } from '../utils/journal-limits.util.js';
 import { normalize } from '../utils/normalize.util.js';
 import { assertSameInstance } from '../utils/new-instance.util.js';
@@ -92,15 +92,15 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
     private readonly scheduler: WorkflowScheduler,
   ) {
     const worker = options.worker === false ? { enabled: false } : (options.worker ?? {});
-    const leaseMs = toMs(worker.leaseDuration ?? '30s');
+    const leaseMs = parseDuration(worker.leaseDuration ?? '30s');
 
     this.clock = options.clock ?? systemClock;
     this.enabled = worker.enabled ?? true;
     this.id = worker.id ?? `${hostname()}:${process.pid}:${randomUUID().slice(0, 8)}`;
     this.concurrency = worker.concurrency ?? 10;
-    this.pollInterval = toMs(worker.pollInterval ?? '1s');
-    this.heartbeatInterval = toMs(worker.heartbeatInterval ?? Math.floor(leaseMs / 3));
-    this.shutdownTimeout = toMs(worker.shutdownTimeout ?? '10s');
+    this.pollInterval = parseDuration(worker.pollInterval ?? '1s');
+    this.heartbeatInterval = parseDuration(worker.heartbeatInterval ?? Math.floor(leaseMs / 3));
+    this.shutdownTimeout = parseDuration(worker.shutdownTimeout ?? '10s');
 
     if (!Number.isInteger(this.concurrency) || this.concurrency < 1) {
       throw new TypeError(`worker.concurrency (${this.concurrency}) must be a positive integer.`);
@@ -129,7 +129,7 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
       clock: this.clock,
       events,
       leaseMs,
-      defaultRetry: resolveRetry(options.retry, DEFAULT_RETRY),
+      defaultRetry: resolveRetry(options.retry),
       journalLimits: resolveJournalLimits(options.journal),
     };
   }

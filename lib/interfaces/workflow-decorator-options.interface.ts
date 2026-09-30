@@ -1,4 +1,4 @@
-import type { Duration } from '../utils/duration.util.js';
+import type { Duration } from '../core/time/duration.js';
 import type { ScheduleSpec } from '../utils/schedule-spec.util.js';
 import type { WorkflowScheduleDeclaration } from './workflow-schedule.interface.js';
 

@@ -14,7 +14,7 @@ import type { WorkflowScheduleRecord } from '../interfaces/workflow-store.interf
 import type { WorkflowsModuleOptions } from '../interfaces/workflows-module-options.interface.js';
 import type { EncodedWorkflowStore } from '../storage/encoded-workflow.store.js';
 import { ENGINE_STORE, WorkflowStorage } from '../storage/workflow.storage.js';
-import { systemClock } from '../utils/clock.util.js';
+import { systemClock } from '../core/time/clock.js';
 import { normalize } from '../utils/normalize.util.js';
 import { nextOccurrence, occurrences, previewSpec, SCHEDULE_ID, scheduleSpec, type ScheduleSpec } from '../utils/schedule-spec.util.js';
 import { WORKFLOWS_MODULE_OPTIONS } from '../workflows.module-definition.js';

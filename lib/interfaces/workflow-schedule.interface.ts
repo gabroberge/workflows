@@ -1,5 +1,5 @@
 import type { Type } from '@nestjs/common';
-import type { Duration } from '../utils/duration.util.js';
+import type { Duration } from '../core/time/duration.js';
 import type { WorkflowInput } from './workflow-runner.interface.js';
 
 /**

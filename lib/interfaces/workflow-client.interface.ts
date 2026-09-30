@@ -1,4 +1,4 @@
-import type { Duration } from '../utils/duration.util.js';
+import type { Duration } from '../core/time/duration.js';
 import type { WorkflowInstance, WorkflowStatus } from './workflow-instance.interface.js';
 
 export interface StartWorkflowOptions {

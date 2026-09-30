@@ -11,7 +11,7 @@ import type { WorkflowsModuleOptions } from '../interfaces/workflows-module-opti
 import type { EncodedWorkflowStore } from '../storage/encoded-workflow.store.js';
 import { ENGINE_STORE, WorkflowStorage } from '../storage/workflow.storage.js';
 import { canonical } from '../utils/canonical.util.js';
-import { systemClock } from '../utils/clock.util.js';
+import { systemClock } from '../core/time/clock.js';
 import { newInstance } from '../utils/new-instance.util.js';
 import { latestOccurrences, nextOccurrence, sameTiming, type ScheduleSpec } from '../utils/schedule-spec.util.js';
 import { WORKFLOWS_MODULE_OPTIONS } from '../workflows.module-definition.js';
