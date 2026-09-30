@@ -12,7 +12,7 @@ import { migrate as migratePglite } from 'drizzle-orm/pglite/migrator';
 import pg from 'pg';
 import type { Database } from './fixtures/database/drizzle.js';
 import * as schema from './fixtures/database/schema.js';
-import { startPostgres } from './support/postgres.js';
+import { endPool, startPostgres } from './support/postgres.js';
 import { fromDrizzle, PostgresWorkflowStore } from '../lib/postgres/index.js';
 import {
   InMemoryWorkflowStore,
@@ -104,7 +104,7 @@ async function postgresBackend(): Promise<SqlBackend | string> {
   await migrate(adminDb, (db) => migratePg(db, { migrationsFolder }));
 
   afterAll(async () => {
-    await admin.end();
+    await endPool(admin);
     await postgres.stop();
   });
 
@@ -113,7 +113,7 @@ async function postgresBackend(): Promise<SqlBackend | string> {
     connect: () => {
       const pool = new pg.Pool({ connectionString: url, max: 10 });
       let ended: Promise<void> | undefined;
-      return { db: drizzlePg(pool, { schema }), close: () => (ended ??= pool.end()) };
+      return { db: drizzlePg(pool, { schema }), close: () => (ended ??= endPool(pool)) };
     },
   };
 }

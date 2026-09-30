@@ -15,7 +15,7 @@ import { Column, DataSource, Entity, PrimaryColumn } from 'typeorm';
 import { fromDrizzle, fromKysely, fromPg, fromPrisma, fromTypeOrm, PostgresWorkflowStore, type SqlExecutor } from '../../lib/postgres/index.js';
 import { workflowStoreContract } from '../../lib/testing/index.js';
 import { PrismaClient } from '../fixtures/prisma/generated/client.js';
-import { startPostgres } from '../support/postgres.js';
+import { endPool, startPostgres } from '../support/postgres.js';
 
 /** The application's table, written in the same transactions as the workflows it starts and signals. */
 export const ORDERS_DDL = 'CREATE TABLE IF NOT EXISTS orders (id text PRIMARY KEY, status text NOT NULL)';
@@ -80,7 +80,7 @@ export const pgClient: ClientFactory = {
       insertOrder: async (tx, id) => {
         await (tx as pg.PoolClient).query("INSERT INTO orders (id, status) VALUES ($1, 'placed')", [id]);
       },
-      close: () => pool.end(),
+      close: () => endPool(pool),
     };
   },
 };
@@ -98,7 +98,7 @@ export const drizzleClient: ClientFactory = {
       insertOrder: async (tx, id) => {
         await (tx as typeof db).insert(drizzleOrders).values({ id, status: 'placed' });
       },
-      close: () => pool.end(),
+      close: () => endPool(pool),
     };
   },
 };
@@ -202,7 +202,7 @@ export async function testDatabase(name: string): Promise<{ database: TestDataba
   const admin = new pg.Pool({ connectionString: url, max: 2 });
   await admin.query(ORDERS_DDL);
   afterAll(async () => {
-    await admin.end();
+    await endPool(admin);
     await postgres.stop();
   });
   return { database: { url, admin } };
