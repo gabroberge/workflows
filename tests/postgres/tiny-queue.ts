@@ -1,8 +1,11 @@
 /**
- * A tiny job queue on PostgreSQL, built only from `@nestjs/workflows/core` and `@nestjs/workflows/postgres`, as a
- * sketch of how a queue package composes them (tiny-queue.spec.ts runs it; nothing of it is published):
+ * A tiny job queue on PostgreSQL, built only from `@nestjs/workflows/core`, `@nestjs/workflows/postgres` and
+ * `@nestjs/store-kit/postgres`, as a sketch of how a queue package composes them (tiny-queue.spec.ts runs it; nothing
+ * of it is published):
  *
  * - its SQL runs through a `SqlExecutor` (`fromPg()` and the rest), in the application's transaction for `add()`;
+ * - its tables are the migrations of a `StoreSchema`, applied once under the kit's migration lock: a queue needs no
+ *   migration runner of its own;
  * - a `LeasedWorker` claims jobs under leases, renews them, aborts a job's signal when its lease is lost, and drains;
  * - `resolveRetry()` and `nextRetry()` decide when a failed job runs again;
  * - a `Scheduler` over its own PostgreSQL `ScheduleStore` (which passes `scheduleStoreContract()`) adds a job per
@@ -11,6 +14,7 @@
  * - a `ResultWaiter` answers `result()`, at once for a job this process ran.
  */
 import { randomUUID } from 'node:crypto';
+import { StoreSchema } from '@nestjs/store-kit/postgres';
 import {
   LeasedWorker,
   nextRetry,
@@ -62,6 +66,31 @@ interface Job {
 
 type Row = Record<string, string | null>;
 
+/** The queue's tables, versioned as a package's store versions its own. */
+const tinyQueueSchema = new StoreSchema({
+  packageName: '@nestjs/tiny-queue',
+  storeName: 'TinyQueue',
+  command: 'tiny-queue',
+  defaultSchema: 'tiny_queue',
+  migrations: [
+    {
+      version: 1,
+      name: 'initial',
+      up: (s) => [
+        `CREATE TABLE ${s}.jobs (
+  id text PRIMARY KEY, queue text NOT NULL, data jsonb, state text NOT NULL DEFAULT 'waiting', attempts integer NOT NULL DEFAULT 0,
+  run_at bigint NOT NULL, lease_token text, lease_owner text, lease_until bigint, result jsonb, error jsonb, schedule_id text,
+  created_at bigint NOT NULL, updated_at bigint NOT NULL)`,
+        `CREATE TABLE ${s}.schedules (
+  id text PRIMARY KEY, target text NOT NULL, declared boolean NOT NULL, spec jsonb NOT NULL, payload jsonb, paused boolean NOT NULL,
+  wake_at bigint, state jsonb NOT NULL, revision integer NOT NULL, lease_token text, lease_owner text, lease_until bigint,
+  created_at bigint NOT NULL, updated_at bigint NOT NULL)`,
+      ],
+    },
+  ],
+  createError: (message, details) => new Error(message, { cause: details.cause }),
+});
+
 export class TinyQueue<D = unknown, R = unknown> {
   readonly worker: LeasedWorker<Job>;
   readonly scheduler: Scheduler;
@@ -106,18 +135,9 @@ export class TinyQueue<D = unknown, R = unknown> {
     });
   }
 
-  /** Creates its schema and tables. */
-  async migrate(): Promise<void> {
-    const { executor, schema } = this.options;
-    await executor.query(`CREATE SCHEMA IF NOT EXISTS "${schema}"`);
-    await executor.query(`CREATE TABLE IF NOT EXISTS ${this.jobs} (
-  id text PRIMARY KEY, queue text NOT NULL, data jsonb, state text NOT NULL DEFAULT 'waiting', attempts integer NOT NULL DEFAULT 0,
-  run_at bigint NOT NULL, lease_token text, lease_owner text, lease_until bigint, result jsonb, error jsonb, schedule_id text,
-  created_at bigint NOT NULL, updated_at bigint NOT NULL)`);
-    await executor.query(`CREATE TABLE IF NOT EXISTS "${schema}".schedules (
-  id text PRIMARY KEY, target text NOT NULL, declared boolean NOT NULL, spec jsonb NOT NULL, payload jsonb, paused boolean NOT NULL,
-  wake_at bigint, state jsonb NOT NULL, revision integer NOT NULL, lease_token text, lease_owner text, lease_until bigint,
-  created_at bigint NOT NULL, updated_at bigint NOT NULL)`);
+  /** Creates its schema and tables: the versions the schema hasn't had yet, once, under the kit's migration lock. */
+  async migrate(): Promise<number[]> {
+    return tinyQueueSchema.migrate(this.options.executor, this.options.schema);
   }
 
   /** Adds a job (in `transaction`, the application's, when given): a job with the same id makes it a no-op. */

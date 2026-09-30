@@ -1,9 +1,9 @@
 /**
- * The tiny queue (tiny-queue.ts), built only from `@nestjs/workflows/core` and `@nestjs/workflows/postgres`, on
- * PostgreSQL: the pieces compose into a queue. A job added in the application's transaction is claimed under a lease
- * and run, a schedule adds one per occurrence, a codec encrypts what the tables hold, a waiter gets the result, a
- * failed job is retried with the core's backoff, and a lost lease aborts the job's signal. Its schedule store passes
- * the core's contract.
+ * The tiny queue (tiny-queue.ts), built only from `@nestjs/workflows/core`, `@nestjs/workflows/postgres` and
+ * `@nestjs/store-kit/postgres`, on PostgreSQL: the pieces compose into a queue. A job added in the application's
+ * transaction is claimed under a lease and run, a schedule adds one per occurrence, a codec encrypts what the tables
+ * hold, a waiter gets the result, a failed job is retried with the core's backoff, and a lost lease aborts the job's
+ * signal. Its schedule store passes the core's contract.
  */
 import { randomBytes } from 'node:crypto';
 import { AesGcmPayloadCodec, isEncodedPayload, ManualClock, occurrenceId } from '../../lib/core/index.js';
@@ -97,6 +97,8 @@ describe('a tiny queue built from the core and postgres exports', () => {
     };
     const { queue: first, schema } = await queueOf<Email, { messageId: string }>({ clock, handler });
     const { queue: second } = await queueOf<Email, { messageId: string }>({ clock, handler }, schema);
+    // The second process finds the queue's tables at the version its code needs: nothing to migrate.
+    expect(await second.migrate()).toEqual([]);
     await first.upsertSchedule('weekly-digest', { every: '1h' }, { to: 'team@example.com' });
 
     clock.set(hours(1));
