@@ -222,6 +222,7 @@ describe.each(adapters)('pods on one database ($name)', ({ name: adapter }) => {
 
     expect(await statusOf(api, 'b1')).toMatchObject({ runs: 2, leaseOwner: 'worker-1' });
     expect(api.events).toEqual([]);
-    expect(worker.events.map((event) => event.type)).toContain('workflow-completed');
+    // The worker emits its events once its writes commit: the API pod can read the status first.
+    await waitFor(() => worker.events.some((event) => event.type === 'workflow-completed'));
   });
 });

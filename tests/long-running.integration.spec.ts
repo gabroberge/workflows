@@ -170,6 +170,8 @@ describe.each(adapters)('long-running steps across pods ($name)', ({ name: adapt
     printer.hold.resolve(); // the step in flight finishes and is journaled
 
     await waitFor(async () => (await api.http('GET', '/reports/r1')).body.status === 'cancelled');
+    // The worker emits its events once its writes commit: another pod can read the status first.
+    await waitFor(() => worker.events.at(-1)?.type === 'workflow-cancelled');
     expect(world.count('publish')).toBe(0);
     expect(world.ops()).toEqual(['prepare', 'page-1', 'page-2', 'page-3', 'page-4', 'page-5', 'discard']);
     expect(worker.events.map((event) => event.type).slice(-3)).toEqual(['workflow-compensating', 'step-compensated', 'workflow-cancelled']);
