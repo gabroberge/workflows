@@ -4,8 +4,11 @@
  * applies and under which lock, the fixture's indexes, a colliding table, a schema behind the code (and ahead of it),
  * the production default, the default isolation, the options, and a first call inside the application's transaction.
  */
-import { readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { drizzle } from 'drizzle-orm/pglite';
+import { migrate as drizzleMigrate } from 'drizzle-orm/pglite/migrator';
 import { PGlite } from '@electric-sql/pglite';
 import pg from 'pg';
 import { fromDrizzle, fromPg, PostgresWorkflowStore, WorkflowSchemaError, type SqlExecutor, type SqlTransaction } from '../../lib/postgres/index.js';
@@ -263,6 +266,35 @@ describe('migrationSql()', () => {
     expect(() => PostgresWorkflowStore.migrationSql({ from: 1, to: 0 })).toThrow("downgrades aren't supported");
     expect(() => PostgresWorkflowStore.migrationSql({ to: 2 })).toThrow('no migrations lead from version 0 to 2');
     expect(() => PostgresWorkflowStore.migrationSql({ from: -1 })).toThrow(RangeError);
+  });
+});
+
+describe("drizzle-kit's statement breakpoints, on PGlite", () => {
+  it("runs migrationSql({ statementBreakpoints: true }) through Drizzle's migrator, one statement at a time, and the store serves on it", async () => {
+    const [migrated, byDrizzle] = [new PGlite(), new PGlite()];
+    const folder = mkdtempSync(join(tmpdir(), 'wft-drizzle-'));
+    mkdirSync(join(folder, 'meta'));
+    writeFileSync(join(folder, '0000_workflows.sql'), PostgresWorkflowStore.migrationSql({ statementBreakpoints: true }));
+    writeFileSync(
+      join(folder, 'meta', '_journal.json'),
+      JSON.stringify({ version: '7', dialect: 'postgresql', entries: [{ idx: 0, version: '7', when: 1790000000000, tag: '0000_workflows', breakpoints: true }] }),
+    );
+    try {
+      await new PostgresWorkflowStore({ executor: fromDrizzle(drizzle(migrated)) }).migrate();
+      const db = drizzle(byDrizzle);
+      await drizzleMigrate(db, { migrationsFolder: folder });
+
+      const indexes = (pglite: PGlite) =>
+        pglite.query("SELECT tablename, indexname, indexdef FROM pg_indexes WHERE schemaname = 'nest_workflows' ORDER BY tablename, indexname").then((result) => result.rows);
+      expect(await indexes(byDrizzle)).toEqual(await indexes(migrated));
+      const store = new PostgresWorkflowStore({ executor: fromDrizzle(db), migrate: false });
+      await expect(store.onModuleInit()).resolves.toBeUndefined();
+      expect(await store.create({ id: 'i-1', workflow: 'w', version: 1, input: null, deadline: null, now: 1 })).toMatchObject({ created: true });
+    } finally {
+      rmSync(folder, { recursive: true, force: true });
+      await migrated.close();
+      await byDrizzle.close();
+    }
   });
 });
 

@@ -17,11 +17,16 @@ async function run(argv: string[], env: StoreCliIo['env'] = {}) {
 }
 
 describe('nest-workflows', () => {
-  it('sql prints the migrations as migrationSql() does, without a database', async () => {
+  it('sql prints the migrations as migrationSql() does, without a database, with statement breakpoints on request', async () => {
     expect(await run(['sql'])).toEqual({ code: 0, out: PostgresWorkflowStore.migrationSql(), err: '' });
     expect(await run(['sql', '--schema', 'shop_workflows', '--from', '0', '--to', '1'])).toEqual({
       code: 0,
       out: PostgresWorkflowStore.migrationSql({ schema: 'shop_workflows', from: 0, to: 1 }),
+      err: '',
+    });
+    expect(await run(['sql', '--dialect', 'postgres', '--statement-breakpoints'])).toEqual({
+      code: 0,
+      out: PostgresWorkflowStore.migrationSql({ statementBreakpoints: true }),
       err: '',
     });
     expect(await run(['sql', '--from', 'one'])).toEqual({ code: 1, out: '', err: '--from takes a version number, not "one".\n' });

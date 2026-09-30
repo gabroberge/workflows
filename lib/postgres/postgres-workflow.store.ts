@@ -9,6 +9,7 @@ import {
   toInt,
   toJson,
   toText,
+  type MigrationSqlOptions,
   type SqlExecutor,
   type SqlTransaction,
   type SqlTransactionOptions,
@@ -112,8 +113,15 @@ export class PostgresWorkflowStore implements WorkflowStore, OnModuleInit {
    * store which versions a schema has. A schema's version is `SELECT max(version) FROM <schema>.migrations`.
    * Downgrades aren't supported. From version 0 it starts with `CREATE SCHEMA IF NOT EXISTS`, which needs the CREATE
    * privilege on the database even when the schema exists: drop that statement if someone created the schema for you.
+   * With `statementBreakpoints`, drizzle-kit's `--> statement-breakpoint` separates the statements, for a custom
+   * drizzle-kit migration: its migrator then runs them one at a time, which PGlite needs.
+   *
+   * ```ts
+   * // drizzle/0003_workflows.sql, created empty by `npx drizzle-kit generate --custom --name=workflows`
+   * writeFileSync('drizzle/0003_workflows.sql', PostgresWorkflowStore.migrationSql({ statementBreakpoints: true }));
+   * ```
    */
-  static migrationSql(options: { schema?: string; from?: number; to?: number } = {}): string {
+  static migrationSql(options: MigrationSqlOptions = {}): string {
     return workflowStoreSchema.sql(options);
   }
 
