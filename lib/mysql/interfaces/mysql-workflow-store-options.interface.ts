@@ -8,7 +8,7 @@ export interface MySqlWorkflowStoreOptions {
    * the pool or ORM connects to; its own transactions run on it, and `start()` and `signal()` with `{ transaction }`
    * take that client's transaction object.
    */
-  executor: SqlExecutor;
+  executor: SqlExecutor<'mysql'>;
   /**
    * The name the store's tables start with, in the connection's database: `<schema>_<table>` (`nest_workflows`:
    * `nest_workflows_instances`, `nest_workflows_signals`...). Keep it for the store alone. Lowercase letters, digits

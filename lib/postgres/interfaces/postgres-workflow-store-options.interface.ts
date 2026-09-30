@@ -7,7 +7,7 @@ export interface PostgresWorkflowStoreOptions {
    * `fromPrisma(prisma)` or `fromKysely(db)`. The store's own transactions run on it, and `start()` and `signal()`
    * with `{ transaction }` take that client's transaction object.
    */
-  executor: SqlExecutor;
+  executor: SqlExecutor<'postgres'>;
   /**
    * The schema that holds the store's tables, created by its first migration: keep it for the store alone. Letters,
    * digits and underscores, not starting with a digit, at most 63 characters. Default: `'nest_workflows'`.

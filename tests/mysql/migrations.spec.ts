@@ -274,11 +274,14 @@ describe('options', () => {
   it("refuse an executor that is none or of PostgreSQL, naming the store's /mysql entry, and a migrate that is no boolean", () => {
     expect(() => new MySqlWorkflowStore({ executor: {} as SqlExecutor })).toThrow('MySqlWorkflowStore: `executor` must be a SqlExecutor');
     const postgres = fromPg(new pg.Pool({ connectionString: 'postgres://nobody@127.0.0.1:1/none' }));
-    expect(() => new MySqlWorkflowStore({ executor: postgres as unknown as SqlExecutor })).toThrow(
+    // A PostgreSQL executor is a compile error first (the options take SqlExecutor<'mysql'>), then a TypeError.
+    // @ts-expect-error
+    expect(() => new MySqlWorkflowStore({ executor: postgres })).toThrow(
       "MySqlWorkflowStore runs on MySQL, and `executor` is a PostgreSQL executor: import the executor from '@nestjs/workflows/mysql' (fromMysql2, fromDrizzle, fromTypeOrm, fromPrisma or fromKysely).",
     );
     // And the other way around.
-    expect(() => new PostgresWorkflowStore({ executor: fromMysql2(pool()) as never })).toThrow(
+    // @ts-expect-error
+    expect(() => new PostgresWorkflowStore({ executor: fromMysql2(pool()) })).toThrow(
       "PostgresWorkflowStore runs on PostgreSQL, and `executor` is a MySQL executor: import the executor from '@nestjs/workflows/postgres' (fromPg, fromDrizzle, fromTypeOrm, fromPrisma or fromKysely).",
     );
     expect(() => new MySqlWorkflowStore({ executor: fromMysql2(pool()), migrate: 'yes' as unknown as boolean })).toThrow(
