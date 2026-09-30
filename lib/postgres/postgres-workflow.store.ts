@@ -15,8 +15,7 @@ import {
   type SqlTransactionOptions,
   type StoreReadiness,
 } from '@nestjs/store-kit/postgres';
-import type { SerializedWorkflowError } from '../interfaces/serialized-workflow-error.interface.js';
-import type { WorkflowInstance, WorkflowJournalEntry, WorkflowParentClose, WorkflowStatus } from '../interfaces/workflow-instance.interface.js';
+import type { WorkflowInstance, WorkflowJournalEntry, WorkflowStatus } from '../interfaces/workflow-instance.interface.js';
 import type {
   NewWorkflowInstance,
   NewWorkflowSignal,
@@ -39,6 +38,8 @@ import type {
   WorkflowStore,
   WorkflowWrite,
 } from '../interfaces/workflow-store.interface.js';
+import { RateWindowClaim, type PickedInstance } from '../sql/rate-windows.js';
+import { CANCELLABLE_STATUSES, INSTANCE_COLUMNS, RUNNABLE_STATUSES, SCHEDULE_COLUMNS, toInstance, toSchedule, type Row } from '../sql/workflow-rows.js';
 import type { WorkflowStorage } from '../storage/workflow.storage.js';
 import type { PostgresWorkflowStoreOptions } from './interfaces/postgres-workflow-store-options.interface.js';
 import { workflowStoreSchema } from './migrations/index.js';
@@ -46,41 +47,8 @@ import { workflowStoreSchema } from './migrations/index.js';
 /** A statement that waited for a lock sees what the lock's holder committed. */
 const READ_COMMITTED: SqlTransactionOptions = { isolationLevel: 'read committed' };
 
-const RUNNABLE = `('pending', 'running', 'suspended', 'compensating')`;
-const CANCELLABLE = `('pending', 'running', 'suspended')`;
-
-const INSTANCE_COLUMNS = [
-  'id',
-  'workflow',
-  'version',
-  'parent_id',
-  'parent_close',
-  'concurrency_key',
-  'rate_limit_key',
-  'priority',
-  'schedule_id',
-  'scheduled_at',
-  'status',
-  'input',
-  'output',
-  'error',
-  'wake_at',
-  'lease_owner',
-  'lease_until',
-  'cancel_requested',
-  'terminate_requested',
-  'cancel_reason',
-  'deadline',
-  'custom_status',
-  'signal_cursor',
-  'runs',
-  'created_at',
-  'updated_at',
-];
-const SCHEDULE_COLUMNS = ['id', 'workflow', 'declared', 'spec', 'input', 'paused', 'wake_at', 'state', 'revision', 'lease_owner', 'lease_until', 'created_at', 'updated_at'];
-
-/** A row as the store reads it: every column cast to text (see `SqlParams`). */
-type Row = Record<string, string | null>;
+const RUNNABLE = `(${RUNNABLE_STATUSES.map((status) => `'${status}'`).join(', ')})`;
+const CANCELLABLE = `(${CANCELLABLE_STATUSES.map((status) => `'${status}'`).join(', ')})`;
 
 /**
  * The first-party `WorkflowStore` on PostgreSQL, through the client the application already has (`fromPg()`,
@@ -593,58 +561,25 @@ FOR UPDATE SKIP LOCKED`,
    * window's row is inserted or locked first, in a fixed order: the count read under the lock is exact (a concurrent
    * claim of the same window waits for this one), and a purge can't delete the row in between.
    */
-  private async takeRoom(tx: SqlTransaction, request: WorkflowClaimRequest, picked: Array<{ id: string; workflow: string; rateLimitKey: string | null }>): Promise<string[]> {
-    const rules = new Map((request.rateLimits ?? []).map((rule) => [rule.workflow, rule]));
-    const windowsOf = ({ workflow, rateLimitKey }: (typeof picked)[number]) => {
-      const rule = rules.get(workflow);
-      return [
-        ...(rule?.limit ? [{ workflow, key: '', ...rule.limit }] : []),
-        ...(rule?.perKey && rateLimitKey !== null ? [{ workflow, key: rateLimitKey, ...rule.perKey }] : []),
-      ];
-    };
-    const named = new Map(picked.flatMap(windowsOf).map((window) => [JSON.stringify([window.workflow, window.key]), window]));
-    if (named.size === 0) {
+  private async takeRoom(tx: SqlTransaction, request: WorkflowClaimRequest, picked: PickedInstance[]): Promise<string[]> {
+    const claim = new RateWindowClaim(request, picked);
+    if (claim.windows.length === 0) {
       return picked.map((instance) => instance.id);
     }
 
-    const { now } = request;
-    const order = [...named.values()].sort((a, b) => (a.workflow < b.workflow ? -1 : a.workflow > b.workflow ? 1 : a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
     const p = new SqlParams();
     const locked = await tx.query<Row>(
       `INSERT INTO ${this.t.rateLimits} AS rl (workflow, key, window_end, count)
-VALUES ${order.map(({ workflow, key }) => `(${p.text(workflow)}, ${p.text(key)}, 0, 0)`).join(', ')}
+VALUES ${claim.windows.map(({ workflow, key }) => `(${p.text(workflow)}, ${p.text(key)}, 0, 0)`).join(', ')}
 ON CONFLICT (workflow, key) DO UPDATE SET count = rl.count
 RETURNING rl.workflow, rl.key, rl.window_end::text AS window_end, rl.count::text AS count`,
       p.values,
     );
-    const open = new Map(
-      locked.map((row) => {
-        const windowEnd = toInt(row.window_end)!;
-        return [JSON.stringify([row.workflow, row.key]), windowEnd > now ? { windowEnd, count: toInt(row.count)! } : null];
-      }),
-    );
+    const { granted, changed } = claim.grant(locked.map((row) => ({ workflow: row.workflow!, key: row.key!, windowEnd: toInt(row.window_end)!, count: toInt(row.count)! })));
 
-    const granted: string[] = [];
-    const changed = new Map<string, { workflow: string; key: string; windowEnd: number; count: number }>();
-    for (const instance of picked) {
-      const windows = windowsOf(instance);
-      if (!windows.every((window) => (open.get(JSON.stringify([window.workflow, window.key]))?.count ?? 0) < window.max)) {
-        continue;
-      }
-
-      for (const window of windows) {
-        const name = JSON.stringify([window.workflow, window.key]);
-        const current = open.get(name) ?? { windowEnd: now + window.duration, count: 0 };
-        current.count++;
-        open.set(name, current);
-        changed.set(name, { workflow: window.workflow, key: window.key, ...current });
-      }
-      granted.push(instance.id);
-    }
-
-    if (changed.size > 0) {
+    if (changed.length > 0) {
       const u = new SqlParams();
-      const values = [...changed.values()].map((w) => ({ workflow: w.workflow, key: w.key, window_end: w.windowEnd, count: w.count }));
+      const values = changed.map((w) => ({ workflow: w.workflow, key: w.key, window_end: w.windowEnd, count: w.count }));
       await tx.query(
         `UPDATE ${this.t.rateLimits} rl SET window_end = v.window_end, count = v.count
 FROM jsonb_to_recordset(${u.json(values)}) AS v(workflow text, key text, window_end bigint, count int)
@@ -853,51 +788,3 @@ ON CONFLICT (instance_id, name) DO UPDATE SET entry = excluded.entry`,
   }
 }
 
-function toInstance(row: Row): WorkflowInstance {
-  return {
-    id: row.id!,
-    workflow: row.workflow!,
-    version: toInt(row.version)!,
-    parentId: row.parent_id,
-    parentClose: row.parent_close as WorkflowParentClose | null,
-    concurrencyKey: row.concurrency_key,
-    rateLimitKey: row.rate_limit_key,
-    priority: toInt(row.priority)!,
-    scheduleId: row.schedule_id,
-    scheduledAt: toInt(row.scheduled_at),
-    status: row.status as WorkflowStatus,
-    input: toJson(row.input),
-    output: toJson(row.output),
-    error: toJson(row.error) as SerializedWorkflowError | null,
-    wakeAt: toInt(row.wake_at),
-    leaseOwner: row.lease_owner,
-    leaseUntil: toInt(row.lease_until),
-    cancelRequested: toBool(row.cancel_requested),
-    terminateRequested: toBool(row.terminate_requested),
-    cancelReason: row.cancel_reason,
-    deadline: toInt(row.deadline),
-    customStatus: toJson(row.custom_status),
-    signalCursor: toInt(row.signal_cursor)!,
-    runs: toInt(row.runs)!,
-    createdAt: toInt(row.created_at)!,
-    updatedAt: toInt(row.updated_at)!,
-  };
-}
-
-function toSchedule(row: Row): WorkflowScheduleRecord {
-  return {
-    id: row.id!,
-    workflow: row.workflow!,
-    declared: toBool(row.declared),
-    spec: toJson(row.spec),
-    input: toJson(row.input),
-    paused: toBool(row.paused),
-    wakeAt: toInt(row.wake_at),
-    state: toJson(row.state),
-    revision: toInt(row.revision)!,
-    leaseOwner: row.lease_owner,
-    leaseUntil: toInt(row.lease_until),
-    createdAt: toInt(row.created_at)!,
-    updatedAt: toInt(row.updated_at)!,
-  };
-}

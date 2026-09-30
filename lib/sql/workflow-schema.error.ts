@@ -1,12 +1,13 @@
-import { WorkflowError } from '../../errors/workflow.error.js';
+import { WorkflowError } from '../errors/workflow.error.js';
 
 /**
- * `PostgresWorkflowStore`'s schema can't serve this version of the package: it is behind the store's migrations (and
- * `migrate` is off), or applying them failed (`cause`). The store refuses every call until it's fixed.
+ * A first-party SQL store's schema can't serve this version of the package (`PostgresWorkflowStore`,
+ * `MySqlWorkflowStore`): it is behind the store's migrations (and `migrate` is off), or applying them failed (`cause`).
+ * The store refuses every call until it's fixed.
  */
 export class WorkflowSchemaError extends WorkflowError {
   override name = 'WorkflowSchemaError';
-  /** The PostgreSQL schema. */
+  /** The store's schema: a PostgreSQL schema, or on MySQL the prefix of its tables' names. */
   readonly schema: string;
   /** The schema's version: the last migration applied to it, `0` for none. */
   readonly version: number;

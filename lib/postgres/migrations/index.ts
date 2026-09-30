@@ -1,5 +1,5 @@
 import { StoreSchema } from '@nestjs/store-kit/postgres';
-import { WorkflowSchemaError } from '../errors/workflow-schema.error.js';
+import { WorkflowSchemaError } from '../../sql/workflow-schema.error.js';
 import { initialMigration } from './initial.migration.js';
 
 /**
