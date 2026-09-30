@@ -8,8 +8,6 @@
  */
 import { CommandBus, CqrsModule, EventBus } from '@nestjs/cqrs';
 import { sql } from 'drizzle-orm';
-import { drizzle } from 'drizzle-orm/node-postgres';
-import pg from 'pg';
 import { SignalOn, StartOn, WorkflowsCqrsModule } from '../lib/cqrs/index.js';
 import { ManualWorkflowClock, Workflow, WorkflowIdConflictError, WorkflowSignal, type WorkflowContext } from '../lib/index.js';
 import {
@@ -23,9 +21,7 @@ import {
   PlaceOrderCommand,
 } from './cqrs-app.js';
 import type { Database } from './fixtures/database/drizzle.js';
-import * as schema from './fixtures/database/schema.js';
-import { orders } from './fixtures/database/schema.js';
-import { boot, connect, openStore, storedSignals, storeKind, tempDb, waitFor, type Connection, type Node, type TestDb } from './support.js';
+import { boot, connect, killableConnection, openStore, orders, storedSignals, storeKind, tempDb, waitFor, type Connection, type Node, type TestDb } from './support.js';
 
 class ParcelPackedEvent {
   constructor(readonly orderId: string) {}
@@ -366,7 +362,8 @@ describe('workflows started and signalled by CQRS events', () => {
       expect(await node.client.getStatus(fulfilmentId('o-1'))).toMatchObject({ input: { orderId: 'o-1', total: 2499 } });
     });
 
-    it.runIf(storeKind === 'postgres')('starts one instance when concurrent transactions publish the same event', async () => {
+    // On a server: PGlite has one connection, so its transactions never run at once.
+    it.runIf(storeKind === 'postgres' || storeKind === 'mysql')('starts one instance when concurrent transactions publish the same event', async () => {
       const node = await start();
 
       // Five handlers race on the pool; each inserts its own order row and publishes the same business key.
@@ -383,22 +380,18 @@ describe('workflows started and signalled by CQRS events', () => {
       expect(await instanceIds()).toEqual([fulfilmentId('shared')]);
     });
 
-    it.runIf(storeKind === 'postgres')('leaves nothing behind when the connection dies inside the transaction', async () => {
+    it.runIf(storeKind === 'postgres' || storeKind === 'mysql')('leaves nothing behind when the connection dies inside the transaction', async () => {
       const node = await start();
       // A connection of its own, to kill: the process dies after publish() resolved, before the commit.
-      const url = (database as unknown as { $client: pg.Pool }).$client.options.connectionString;
-      const client = new pg.Client({ connectionString: url });
-      client.on('error', () => undefined); // the terminated connection reports itself here too
-      await client.connect();
-      const dying = drizzle(client, { schema });
+      const dying = await killableConnection();
 
-      const placed = dying.transaction(async (tx) => {
+      const placed = dying.db.transaction(async (tx) => {
         await tx.insert(orders).values({ id: 'o-1', userId: 'u_42', items: [], total: 2499, status: 'placed' });
         await node.eventBus.publish(new OrderPlacedEvent('o-1', 2499), { transaction: tx });
-        await tx.execute(sql`SELECT pg_terminate_backend(pg_backend_pid())`);
+        await dying.kill(tx);
       });
       await expect(placed).rejects.toThrow();
-      await client.end().catch(() => undefined);
+      await dying.close();
 
       expect(await orderIds()).toEqual([]);
       expect(await instanceIds()).toEqual([]);

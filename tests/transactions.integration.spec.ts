@@ -1,8 +1,10 @@
 /**
  * `start()` and `signal()` inside the application's transaction, on the workflows tutorial's
  * application (its controllers, services and workflow, and `PostgresWorkflowStore` on its Drizzle
- * database) served on Express and Fastify, over PGlite and PostgreSQL. The in-memory store can't roll anything
- * back, so these run on the SQL stores only (storage.spec.ts covers its warning).
+ * database) served on Express and Fastify, over PGlite and PostgreSQL; and on MySQL, the same
+ * application on MySQL (fixtures/mysql: `MySqlWorkflowStore` registered by a factory provider on
+ * its Drizzle mysql2 database, as the docs show it). The in-memory store can't roll anything back,
+ * so these run on the SQL stores only (storage.spec.ts covers its warning).
  */
 import { BadRequestException, Body, Controller, Module, Post } from '@nestjs/common';
 import { APP_FILTER } from '@nestjs/core';
@@ -11,7 +13,7 @@ import { eq, inArray, sql } from 'drizzle-orm';
 import { createApp, adapters, type AdapterName } from './support/adapters.js';
 import { AppModule } from './fixtures/app.module.js';
 import type { Database } from './fixtures/database/drizzle.js';
-import { orders } from './fixtures/database/schema.js';
+import { MySqlAppModule } from './fixtures/mysql/app.module.js';
 import { fulfilmentId, OrderFulfilmentWorkflow } from './fixtures/orders/order-fulfilment.workflow.js';
 import type { Order } from './fixtures/orders/order.js';
 import { PaymentProviderClient } from './fixtures/payments/payment-provider.client.js';
@@ -23,7 +25,7 @@ import {
   type WorkflowWorkerOptions,
 } from '../lib/index.js';
 import { WorkflowErrorFilter } from './http-app.js';
-import { connect, openStore, storeKind, tempDb, type Connection, type TestDb, waitFor } from './support.js';
+import { connect, openStore, orders, storeKind, tempDb, type Connection, type TestDb, waitFor } from './support.js';
 
 const kibble = { productId: 'salmon-kibble-2kg', quantity: 1, price: 2499 };
 
@@ -46,7 +48,9 @@ class OrderImportsController {
 
         const items = [{ ...kibble, quantity: line.quantity }];
         const order: Order = { id: line.id, userId: line.userId, items, total: kibble.price * line.quantity, status: 'placed' };
-        await tx.insert(orders).values(order).onConflictDoNothing();
+        const insert = tx.insert(orders).values(order);
+        // Insert-or-ignore: MySQL's is an update to the key the row already has.
+        await (storeKind === 'mysql' ? (insert as unknown as MySqlInsert).onDuplicateKeyUpdate({ set: { id: sql`id` } }) : insert.onConflictDoNothing());
         started.push(await this.workflowClient.start(OrderFulfilmentWorkflow, order, { id: fulfilmentId(order.id), transaction: tx }));
       }
       return started;
@@ -54,8 +58,13 @@ class OrderImportsController {
   }
 }
 
+/** Drizzle's MySQL insert, which the spec's PostgreSQL types don't know. */
+interface MySqlInsert {
+  onDuplicateKeyUpdate(config: { set: Record<string, unknown> }): Promise<unknown>;
+}
+
 @Module({
-  imports: [AppModule],
+  imports: [storeKind === 'mysql' ? MySqlAppModule : AppModule],
   controllers: [OrderImportsController],
   providers: [{ provide: APP_FILTER, useClass: WorkflowErrorFilter }],
 })

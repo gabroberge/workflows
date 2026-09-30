@@ -13,8 +13,7 @@ import { WorkflowsCqrsModule } from '../lib/cqrs/index.js';
 import { ManualWorkflowClock, type WorkflowStore } from '../lib/index.js';
 import { cqrsProviders, fulfilmentId, Ledger, OrderFulfilmentWorkflow, OrderPlacedEvent, PlaceOrderCommand } from './cqrs-app.js';
 import type { Database } from './fixtures/database/drizzle.js';
-import { orders } from './fixtures/database/schema.js';
-import { boot, connect, storeKind, tempDb, waitFor, type Node, type TestDb } from './support.js';
+import { boot, connect, orders, storeKind, tempDb, waitFor, type Node, type TestDb } from './support.js';
 
 /** What the request-scoped handler saw: the tenant its context carried, and which instance of it ran. */
 class Tenants {

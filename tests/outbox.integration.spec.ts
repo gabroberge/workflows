@@ -2,8 +2,11 @@
  * Workflows next to the transactional outbox (`@nestjs/outbox`, https://docs.nestjs.com/reliability/outbox): a
  * checkout that saves the order, starts its workflow and adds its message in one transaction,
  * and an outbox handler that turns a message into a signal, with the handler's inbox absorbing
- * the redelivery. On SQL stores both stores are the tutorials' Drizzle recipes on the same
- * database; in memory, both in-memory defaults.
+ * the redelivery. On PostgreSQL both stores are the tutorials' Drizzle recipes on the same
+ * database; in memory, both in-memory defaults. On MySQL, workflows' store is MySqlWorkflowStore in
+ * the application's transaction, and the outbox the in-memory default (the tutorial's outbox store
+ * is a PostgreSQL recipe), which writes at once: the test that rolls a message back with the order
+ * runs where both stores are SQL.
  */
 import { readFileSync } from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -11,14 +14,13 @@ import { BadRequestException, Body, Controller, HttpCode, Inject, Injectable, Pa
 import { getDrizzleToken } from '@nestjs/drizzle';
 import { sql } from 'drizzle-orm';
 import type { Database } from './fixtures/database/drizzle.js';
-import { orders } from './fixtures/database/schema.js';
 import { DrizzleOutboxStore } from './fixtures/outbox/drizzle-outbox.store.js';
 import { adapters } from './support/adapters.js';
 import { InMemoryMailTransport, MailModule, Mailer } from '@nestjs/mail';
 import { OnOutboxMessage, Outbox, OutboxModule, OutboxRelay, type OutboxHandlerContext } from '@nestjs/outbox';
 import { ManualWorkflowClock, Workflow, WorkflowClient, WorkflowSignal, type WorkflowContext } from '../lib/index.js';
 import { bootHttp, type HttpNode } from './http-app.js';
-import { connect, openStore, storeKind, tempDb, type TestDb, World } from './support.js';
+import { connect, openStore, orders, storeKind, tempDb, type TestDb, World } from './support.js';
 
 interface Payment {
   orderId: string;
@@ -26,7 +28,10 @@ interface Payment {
 }
 
 const paymentSettled = new WorkflowSignal<Payment>('payment.settled');
+/** Workflows' store is a SQL one: the application's transactions are Drizzle's, beside its orders. */
 const sqlStore = storeKind !== 'memory';
+/** The outbox's store is the tutorial's (PostgreSQL) Drizzle recipe too, on the same database. */
+const sqlOutbox = storeKind === 'pglite' || storeKind === 'postgres';
 
 /** The outbox tutorial's tables, next to the workflow tables on the test database. */
 async function createOutboxTables(database: Database) {
@@ -158,7 +163,11 @@ describe.each(adapters)('workflows with the outbox ($name)', ({ name: adapter })
     mailbox = new InMemoryMailTransport();
     if (sqlStore) {
       const connection = connect(db);
-      await createOutboxTables(connection.db as Database);
+      if (sqlOutbox) {
+        await createOutboxTables(connection.db as Database);
+      } else {
+        await (connection.db as Database).execute(sql`DELETE FROM orders`);
+      }
       await connection.close();
     }
 
@@ -170,7 +179,7 @@ describe.each(adapters)('workflows with the outbox ($name)', ({ name: adapter })
         MailModule.forRoot({ transport: mailbox, from: 'Orders <orders@example.com>' }),
       ],
       workflows: [Checkout],
-      providers: [{ provide: World, useValue: world }, CheckoutHandlers, ...(sqlStore ? [DrizzleOutboxStore] : [])],
+      providers: [{ provide: World, useValue: world }, CheckoutHandlers, ...(sqlOutbox ? [DrizzleOutboxStore] : [])],
       controllers: [CheckoutController],
     });
   });
@@ -211,7 +220,7 @@ describe.each(adapters)('workflows with the outbox ($name)', ({ name: adapter })
     expect(mailbox.mails.map((mail) => mail.subject)).toEqual(['Order o1 received', 'Receipt for o1']);
   });
 
-  it.runIf(sqlStore)('commits the order, its workflow and its message together, or none of them', async () => {
+  it.runIf(sqlOutbox)('commits the order, its workflow and its message together, or none of them', async () => {
     const declined = await pod.http('POST', '/checkout/o1', { email: 'ada@example.com', declined: true });
     expect(declined).toMatchObject({ status: 400, body: { message: 'Card declined.' } });
 

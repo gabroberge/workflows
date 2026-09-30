@@ -4,15 +4,22 @@ import { Inject, Injectable, Module, type DynamicModule, type OnApplicationShutd
 import { getDrizzleToken } from '@nestjs/drizzle';
 import { Test, type TestingModule } from '@nestjs/testing';
 import { sql } from 'drizzle-orm';
+import { bigint as mysqlBigint, mysqlTable, varchar } from 'drizzle-orm/mysql-core';
+import { drizzle as drizzleMysql } from 'drizzle-orm/mysql2';
 import { drizzle as drizzlePg } from 'drizzle-orm/node-postgres';
 import { migrate as migratePg } from 'drizzle-orm/node-postgres/migrator';
 import { bigint, pgSchema, text } from 'drizzle-orm/pg-core';
 import { drizzle as drizzlePglite } from 'drizzle-orm/pglite';
 import { migrate as migratePglite } from 'drizzle-orm/pglite/migrator';
+import mysql from 'mysql2/promise';
 import pg from 'pg';
 import type { Database } from './fixtures/database/drizzle.js';
 import * as schema from './fixtures/database/schema.js';
+import type { Database as MySqlDatabase } from './fixtures/mysql/drizzle.js';
+import * as mysqlSchema from './fixtures/mysql/schema.js';
+import { adminPool, startMysql } from './support/mysql.js';
 import { endPool, startPostgres } from './support/postgres.js';
+import { fromDrizzle as fromMysqlDrizzle, fromMysql2, MySqlWorkflowStore } from '../lib/mysql/index.js';
 import { fromDrizzle, PostgresWorkflowStore } from '../lib/postgres/index.js';
 import {
   InMemoryWorkflowStore,
@@ -32,7 +39,7 @@ import {
 
 /**
  * The engine suites run once per store, chosen by `WORKFLOWS_TEST_STORE`
- * (vitest.config.ts runs one project per value, so a plain `npx vitest run` runs all three):
+ * (vitest.config.ts runs one project per value, so a plain `npx vitest run` runs all four):
  *
  * - `memory` (the default): `InMemoryWorkflowStore`. A "restart" registers the same store
  *   object in the new application, as a database outlives a process.
@@ -44,25 +51,36 @@ import {
  * - `postgres`: the same on a PostgreSQL server: `SQL_TEST_PG_URL`, else a throwaway
  *   cluster from local binaries, else every test is skipped with the reason. Every
  *   application opens its own pool, so several on one database race on real connections.
+ * - `mysql`: `MySqlWorkflowStore` (`@nestjs/workflows/mysql`) through `fromDrizzle()` on
+ *   mysql2, on the MySQL of `SQL_TEST_MYSQL_URL`, else every test is skipped with the reason.
+ *   The database has the tutorial's `orders` table (its MySQL version, fixtures/mysql). Every
+ *   application opens its own pool (small: the server may be shared).
  *
  * One database per test file, emptied by `tempDb()` for each test (one test database at a time).
  */
-export type StoreKind = 'memory' | 'pglite' | 'postgres';
+export type StoreKind = 'memory' | 'pglite' | 'postgres' | 'mysql';
 export const storeKind = (process.env.WORKFLOWS_TEST_STORE ?? 'memory') as StoreKind;
-if (!['memory', 'pglite', 'postgres'].includes(storeKind)) {
-  throw new Error(`WORKFLOWS_TEST_STORE must be memory, pglite or postgres, not "${storeKind}".`);
+if (!['memory', 'pglite', 'postgres', 'mysql'].includes(storeKind)) {
+  throw new Error(`WORKFLOWS_TEST_STORE must be memory, pglite, postgres or mysql, not "${storeKind}".`);
 }
 export const storeLabel = {
   memory: 'InMemoryWorkflowStore',
   pglite: 'PostgresWorkflowStore on PGlite',
   postgres: 'PostgresWorkflowStore on PostgreSQL',
+  mysql: 'MySqlWorkflowStore on MySQL',
 }[storeKind];
+
+/** The connections each application's pool opens at most on MySQL: the server may be shared. */
+const MYSQL_POOL_SIZE = 3;
 
 const migrationsFolder = fileURLToPath(new URL('./fixtures/drizzle', import.meta.url));
 
 /** A database the Drizzle store runs on: emptied per test, and connected to once per "process". */
 interface SqlBackend {
+  /** The database's URL, on a server (not PGlite). */
+  url?: string;
   reset(): Promise<void>;
+  /** A connection as an application opens one: a Drizzle database on a pool of its own (the MySQL one on MySQL). */
   connect(): { db: Database; close(): Promise<void> };
 }
 
@@ -109,6 +127,7 @@ async function postgresBackend(): Promise<SqlBackend | string> {
   });
 
   return {
+    url,
     reset: () => truncate(adminDb),
     connect: () => {
       const pool = new pg.Pool({ connectionString: url, max: 10 });
@@ -118,11 +137,49 @@ async function postgresBackend(): Promise<SqlBackend | string> {
   };
 }
 
-const backend = storeKind === 'pglite' ? await pgliteBackend() : storeKind === 'postgres' ? await postgresBackend() : null;
+/** The store's tables on MySQL, emptied for each test: TRUNCATE also starts the signals' ids at 1 again. */
+const MYSQL_STORE_TABLES = ['instances', 'journal', 'waits', 'signals', 'schedules', 'rate_limits'].map((table) => `nest_workflows_${table}`);
+
+async function mysqlBackend(): Promise<SqlBackend | string> {
+  const { mysql: server, reason } = await startMysql();
+  if (!server) {
+    return reason;
+  }
+
+  const { url } = await server.createDatabase('workflows_engine');
+  const admin = adminPool(url);
+  // The tutorial's table (its own migration), then MySqlWorkflowStore's.
+  await admin.query(mysqlSchema.ORDERS_DDL);
+  await new MySqlWorkflowStore({ executor: fromMysql2(admin) }).migrate();
+
+  afterAll(async () => {
+    await admin.end();
+    await server.stop();
+  });
+
+  return {
+    url,
+    reset: async () => {
+      for (const table of MYSQL_STORE_TABLES) {
+        await admin.query(`TRUNCATE TABLE \`${table}\``);
+      }
+    },
+    connect: () => {
+      const pool = mysql.createPool({ uri: url, connectionLimit: MYSQL_POOL_SIZE });
+      let ended: Promise<void> | undefined;
+      const db = drizzleMysql(pool, { schema: mysqlSchema, mode: 'default' });
+      // Typed as the PostgreSQL database the specs are written against: the query builders they use are the same.
+      return { db: db as unknown as Database, close: () => (ended ??= pool.end()) };
+    },
+  };
+}
+
+const backend =
+  storeKind === 'pglite' ? await pgliteBackend() : storeKind === 'postgres' ? await postgresBackend() : storeKind === 'mysql' ? await mysqlBackend() : null;
 const sqlBackend = typeof backend === 'string' ? null : backend;
 
-/** Why this store's tests are skipped (no PostgreSQL server), if they are. */
-export const skipReason = typeof backend === 'string' ? `no PostgreSQL: ${backend}` : undefined;
+/** Why this store's tests are skipped (no PostgreSQL or MySQL server), if they are. */
+export const skipReason = typeof backend === 'string' ? `no ${storeKind === 'mysql' ? 'MySQL' : 'PostgreSQL'}: ${backend}` : undefined;
 if (skipReason) {
   beforeEach((context) => context.skip(skipReason));
 }
@@ -165,17 +222,79 @@ export function connect(db: TestDb): Connection {
 /** A store on the test database outside any application, to look at what one left behind. */
 export function openStore(db: TestDb): { store: WorkflowStore; close(): Promise<void> } {
   const connection = connect(db);
-  const store = connection.db instanceof InMemoryWorkflowStore ? connection.db : new PostgresWorkflowStore({ executor: fromDrizzle(connection.db), migrate: false });
+  const store =
+    connection.db instanceof InMemoryWorkflowStore
+      ? connection.db
+      : storeKind === 'mysql'
+        ? new MySqlWorkflowStore({ executor: fromMysqlDrizzle(connection.db as unknown as MySqlDatabase), migrate: false })
+        : new PostgresWorkflowStore({ executor: fromDrizzle(connection.db), migrate: false });
   return { store, close: () => connection.close() };
 }
 
-/** PostgresWorkflowStore's signals, for tests that read what a run left in the database. */
-export const storedSignals = pgSchema('nest_workflows').table('signals', {
+/** The class of this run's store: tests that spy on its methods do it on its prototype. */
+export const storeClass: Type<WorkflowStore> = storeKind === 'memory' ? InMemoryWorkflowStore : storeKind === 'mysql' ? MySqlWorkflowStore : PostgresWorkflowStore;
+
+/**
+ * The tutorial's `orders` table on this run's database (fixtures/database on PostgreSQL, fixtures/mysql on MySQL),
+ * typed as PostgreSQL's: the specs write to it with the query builders both dialects share.
+ */
+export const orders = (storeKind === 'mysql' ? mysqlSchema.orders : schema.orders) as unknown as typeof schema.orders;
+
+const pgSignals = pgSchema('nest_workflows').table('signals', {
   id: bigint('id', { mode: 'number' }).notNull(),
   name: text('name').notNull(),
   key: text('key'),
   dedupeId: text('dedupe_id'),
 });
+const mysqlSignals = mysqlTable('nest_workflows_signals', {
+  id: mysqlBigint('id', { mode: 'number' }).notNull(),
+  name: varchar('name', { length: 255 }).notNull(),
+  key: varchar('key', { length: 255 }),
+  dedupeId: varchar('dedupe_id', { length: 255 }),
+});
+
+/** The SQL store's signals, for tests that read what a run left in the database (typed as PostgreSQL's). */
+export const storedSignals = (storeKind === 'mysql' ? mysqlSignals : pgSignals) as unknown as typeof pgSignals;
+
+/** Every row of the SQL store's tables, each as JSON: what someone who can read the database sees. */
+export async function storeRows(connection: Connection): Promise<string[]> {
+  const rows: string[] = [];
+  for (const name of ['instances', 'journal', 'waits', 'signals', 'schedules', 'rate_limits']) {
+    if (storeKind === 'mysql') {
+      const [result] = (await (connection.db as unknown as MySqlDatabase).execute(sql.raw(`SELECT * FROM nest_workflows_${name}`))) as unknown as [object[]];
+      rows.push(...result.map((row) => JSON.stringify(row)));
+    } else {
+      const result = await (connection.db as Database).execute<{ row: string }>(sql.raw(`SELECT row_to_json(t)::text AS row FROM nest_workflows.${name} t`));
+      rows.push(...result.rows.map((row) => row.row));
+    }
+  }
+  return rows;
+}
+
+/**
+ * A connection of its own to kill inside a transaction, as a process that dies mid-transaction does: a Drizzle
+ * database on one connection, and `kill(tx)`, which ends that connection from inside the transaction.
+ */
+export async function killableConnection(): Promise<{ db: Database; kill(tx: unknown): Promise<unknown>; close(): Promise<void> }> {
+  if (storeKind === 'mysql') {
+    const connection = await mysql.createConnection({ uri: sqlBackend!.url! });
+    connection.on('error', () => undefined); // the killed connection reports itself here too
+    return {
+      db: drizzleMysql(connection, { schema: mysqlSchema, mode: 'default' }) as unknown as Database,
+      kill: (tx) => (tx as MySqlDatabase).execute(sql`KILL CONNECTION_ID()`),
+      close: () => connection.end().catch(() => undefined),
+    };
+  }
+
+  const client = new pg.Client({ connectionString: sqlBackend!.url! });
+  client.on('error', () => undefined); // the terminated connection reports itself here too
+  await client.connect();
+  return {
+    db: drizzlePg(client, { schema }),
+    kill: (tx) => (tx as Database).execute(sql`SELECT pg_terminate_backend(pg_backend_pid())`),
+    close: () => client.end().catch(() => undefined),
+  };
+}
 
 /** The connection a `databaseModule()` provides. */
 export const DATABASE = Symbol('DATABASE');
@@ -260,13 +379,24 @@ class PostgresAppStore extends PostgresWorkflowStore {
   }
 }
 
+/** MySqlWorkflowStore as an app registers it: on the Drizzle MySQL database it injects. */
+@Injectable()
+class MySqlAppStore extends MySqlWorkflowStore {
+  constructor(@Inject(getDrizzleToken()) db: MySqlDatabase, storage: WorkflowStorage) {
+    super({ executor: fromMysqlDrizzle(db) }, storage);
+  }
+}
+
+/** This run's SQL store, as an app registers it. */
+const SqlAppStore: Type<WorkflowStore> = storeKind === 'mysql' ? MySqlAppStore : PostgresAppStore;
+
 /**
  * The store provider as an app writes one: it injects its database (from `databaseModule()`)
- * and registers itself in its constructor. PostgresWorkflowStore on the app's Drizzle database,
- * or in the memory runs a provider over the test database's in-memory store. A subclass that
- * declares no constructor (and no decorator) keeps the injection.
+ * and registers itself in its constructor. PostgresWorkflowStore or MySqlWorkflowStore on the
+ * app's Drizzle database, or in the memory runs a provider over the test database's in-memory
+ * store. A subclass that declares no constructor (and no decorator) keeps the injection.
  */
-export const AppWorkflowStore: Type<WorkflowStore> = sqlBackend ? PostgresAppStore : InMemoryAppStore;
+export const AppWorkflowStore: Type<WorkflowStore> = sqlBackend ? SqlAppStore : InMemoryAppStore;
 
 /**
  * The app's database module on the test database, like a hand-written database module: it provides
@@ -316,7 +446,7 @@ export interface Node {
   moduleRef: TestingModule;
   client: WorkflowClient;
   worker: WorkflowWorker;
-  /** The registered store: the database's in-memory store, or a PostgresWorkflowStore on this node's connection. */
+  /** The registered store: the database's in-memory store, or the SQL store on this node's connection. */
   store: WorkflowStore;
   events: WorkflowEvent[];
   /** Graceful shutdown (app.close()), then the node's connection is closed. */
@@ -364,11 +494,11 @@ async function bootOn(connection: Connection, options: Parameters<typeof boot>[0
       ...options.workflows,
       ...(options.providers ?? []),
       // As an app registers it: a provider that injects the database and registers itself.
-      ...(drizzle ? [PostgresAppStore, { provide: getDrizzleToken(), useValue: drizzle }] : []),
+      ...(drizzle ? [SqlAppStore, { provide: getDrizzleToken(), useValue: drizzle }] : []),
     ],
   }).compile();
 
-  const store = drizzle ? moduleRef.get(PostgresAppStore) : (connection.db as InMemoryWorkflowStore);
+  const store = drizzle ? moduleRef.get(SqlAppStore) : (connection.db as InMemoryWorkflowStore);
   if (!drizzle) {
     moduleRef.get(WorkflowStorage).registerSource(store);
   }

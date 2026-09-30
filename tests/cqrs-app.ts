@@ -25,8 +25,7 @@ import { map, type Observable } from 'rxjs';
 import { SignalOn, StartOn } from '../lib/cqrs/index.js';
 import { Workflow, WorkflowClient, WorkflowSignal, type WorkflowContext } from '../lib/index.js';
 import type { Database } from './fixtures/database/drizzle.js';
-import { orders } from './fixtures/database/schema.js';
-import { deferred, forever } from './support.js';
+import { deferred, forever, orders } from './support.js';
 
 export class OrderPlacedEvent {
   constructor(

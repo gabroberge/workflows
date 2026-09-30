@@ -3,13 +3,13 @@ import { configDefaults, defineConfig } from 'vitest/config';
 /** The PostgreSQL projects' setup: their Prisma client, and the sweep of stale `wft_` databases (SQL_TEST_PG_URL). */
 const postgresSetup = ['tests/support/generate-prisma-client.ts', 'tests/support/global-setup.ts'];
 
-/** The MySQL project's setup: the sweep of stale `wft_` databases on SQL_TEST_MYSQL_URL. */
+/** The MySQL projects' setup: the sweep of stale `wft_` databases on SQL_TEST_MYSQL_URL. */
 const mysqlSetup = ['tests/support/mysql-global-setup.ts'];
 
 /**
- * The MySQL project runs after the others, on at most this many files at a time: the server may be shared (the nest
- * repo's integration MySQL, max_connections 151), and each file keeps a few small pools open (about 20 connections at
- * most in all, measured).
+ * The MySQL projects run after the others, one after the other, each on at most this many files at a time: the server
+ * may be shared (the nest repo's integration MySQL, max_connections 151), and each file keeps a few small pools open
+ * (about 20 connections at most in all, measured).
  */
 const mysqlWorkers = 4;
 
@@ -28,11 +28,12 @@ export default defineConfig({
   test: {
     globals: true,
     setupFiles: ['reflect-metadata'],
-    // The engine suites run once per store (tests/support.ts): in memory, and PostgresWorkflowStore
+    // The engine suites run once per store (tests/support.ts): in memory, PostgresWorkflowStore
     // (@nestjs/workflows/postgres) on PGlite and on PostgreSQL (SQL_TEST_PG_URL, else a throwaway
-    // cluster from local binaries, else skipped with the reason). There, contract.spec.ts checks the
-    // tutorial's hand-written DrizzleWorkflowStore (tests/fixtures/). tests/postgres/ and tests/mysql/
-    // are the SQL stores' own projects (MySQL: SQL_TEST_MYSQL_URL, else skipped with the reason): their
+    // cluster from local binaries, else skipped with the reason), and MySqlWorkflowStore
+    // (@nestjs/workflows/mysql) on MySQL (SQL_TEST_MYSQL_URL, else skipped with the reason). On
+    // PostgreSQL, contract.spec.ts checks the tutorial's hand-written DrizzleWorkflowStore
+    // (tests/fixtures/). tests/postgres/ and tests/mysql/ are the SQL stores' own projects: their
     // contract through every executor, transactions, migrations. `--project workflows:pglite` runs one
     // of them.
     projects: [
@@ -46,7 +47,7 @@ export default defineConfig({
           globalSetup: postgresSetup,
         },
       },
-      ...(['pglite', 'postgres'] as const).map((store) => ({
+      ...(['pglite', 'postgres', 'mysql'] as const).map((store) => ({
         extends: true as const,
         test: {
           name: `workflows:${store}`,
@@ -61,11 +62,14 @@ export default defineConfig({
             'tests/core/**',
             'tests/storage.spec.ts',
             'tests/cqrs.spec.ts',
+            // contract.spec.ts checks the tutorial's hand-written DrizzleWorkflowStore, a PostgreSQL recipe; on MySQL,
+            // tests/mysql/ runs the contract on MySqlWorkflowStore through every executor.
+            ...(store === 'mysql' ? ['tests/contract.spec.ts'] : []),
           ],
           env: { WORKFLOWS_TEST_STORE: store },
           testTimeout: 20_000,
           hookTimeout: 30_000,
-          globalSetup: postgresSetup,
+          ...(store === 'mysql' ? { globalSetup: mysqlSetup, maxWorkers: mysqlWorkers, sequence: { groupOrder: 2 } } : { globalSetup: postgresSetup }),
         },
       })),
       {
@@ -87,7 +91,8 @@ export default defineConfig({
           hookTimeout: 30_000,
           // Its own Prisma client too (tests/fixtures/prisma-mysql), so no two projects' setups write the same files.
           globalSetup: ['tests/support/generate-prisma-mysql-client.ts', ...mysqlSetup],
-          // vitest 5 runs projects with another worker count in a group of their own.
+          // vitest 5 runs projects with another worker count in a group of their own; the engine suites on MySQL
+          // (workflows:mysql) run in the next one, so the two never share the server's connections.
           maxWorkers: mysqlWorkers,
           sequence: { groupOrder: 1 },
         },

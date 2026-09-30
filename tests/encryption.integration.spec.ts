@@ -19,8 +19,7 @@ import {
   type WorkflowPayloadCodec,
 } from '../lib/index.js';
 import type { Database } from './fixtures/database/drizzle.js';
-import { orders } from './fixtures/database/schema.js';
-import { boot, connect, storeKind, tempDb, World, type Node, type TestDb } from './support.js';
+import { boot, connect, orders, storeKind, storeRows, tempDb, World, type Node, type TestDb } from './support.js';
 
 /** What the application stores, one secret per place it is stored: a leak names the place. */
 const S = {
@@ -242,12 +241,7 @@ async function dump(): Promise<string> {
       return inspect(connection.db, { depth: null, maxArrayLength: null, maxStringLength: null, breakLength: Infinity });
     }
 
-    const rows: string[] = [];
-    for (const table of ['instances', 'journal', 'waits', 'signals', 'schedules', 'rate_limits'].map((name) => `nest_workflows.${name}`)) {
-      const result = await connection.db.execute<{ row: string }>(sql.raw(`SELECT row_to_json(t)::text AS row FROM ${table} t`));
-      rows.push(...result.rows.map((row) => row.row));
-    }
-    return rows.join('\n');
+    return (await storeRows(connection)).join('\n');
   } finally {
     await connection.close();
   }

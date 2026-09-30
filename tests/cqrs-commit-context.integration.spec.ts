@@ -23,8 +23,7 @@ import {
   type CommitWithContext,
 } from './cqrs-app.js';
 import type { Database } from './fixtures/database/drizzle.js';
-import { orders } from './fixtures/database/schema.js';
-import { boot, connect, storedSignals, storeKind, tempDb, waitFor, type Connection, type Node, type TestDb } from './support.js';
+import { boot, connect, orders, storedSignals, storeKind, tempDb, waitFor, type Connection, type Node, type TestDb } from './support.js';
 
 class Order extends AggregateRoot {
   constructor(readonly id: string) {
