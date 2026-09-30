@@ -128,8 +128,14 @@ export const prismaClient: ClientFactory = {
       name: this.name,
       executor: fromPrisma(prisma),
       root: prisma,
+      // The application's own limits. Prisma's default maxWait (2 s) is shorter than the queue for a connection gets
+      // on a busy machine when 60 signals, which the store serializes, share a pool of 10 with 60 suspensions.
       transaction: (work, isolation) =>
-        prisma.$transaction((tx) => work(tx), { timeout: 30_000, ...(isolation ? { isolationLevel: isolation === 'repeatable read' ? 'RepeatableRead' : 'ReadCommitted' } : {}) }),
+        prisma.$transaction((tx) => work(tx), {
+          maxWait: 10_000,
+          timeout: 30_000,
+          ...(isolation ? { isolationLevel: isolation === 'repeatable read' ? 'RepeatableRead' : 'ReadCommitted' } : {}),
+        }),
       insertOrder: async (tx, id) => {
         await (tx as PrismaClient).order.create({ data: { id, status: 'placed' } });
       },
