@@ -17,3 +17,7 @@ export type { PayloadCodec, PayloadContext, SerializedError } from './interfaces
 // Limits: concurrency and rate limits, priorities, and rate-limit window arithmetic (the claims themselves are a store's)
 export { assertPriority, MAX_PRIORITY, rateWindowRoom, resolveConcurrency, resolveRateLimit, takeRateWindow } from './limits/index.js';
 export type { ConcurrencyLimit, RateLimit, RateWindow, RateWindowState, ResolvedConcurrency, ResolvedRateLimit } from './interfaces/index.js';
+
+// Results: waiting for an outcome, settled at once by this process or read from the store with a backoff
+export { ResultWaiter } from './results/index.js';
+export type { ResultOutcome, ResultWaiterOptions, ResultWaitOptions } from './interfaces/index.js';
