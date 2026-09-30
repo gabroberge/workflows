@@ -30,15 +30,12 @@ import {
 } from './workflow-execution.service.js';
 import { WorkflowEvents } from '../events/workflow-events.service.js';
 import type { WorkflowEvent } from '../events/workflow-events.interface.js';
+import type { EncodedWorkflowStore } from '../storage/encoded-workflow.store.js';
 import { ENGINE_STORE, WorkflowStorage } from '../storage/workflow.storage.js';
-import type {
-  WorkflowInstanceDetails,
-  WorkflowRelease,
-  WorkflowStore,
-  WorkflowWrite,
-} from '../interfaces/workflow-store.interface.js';
+import type { WorkflowInstanceDetails, WorkflowRelease, WorkflowWrite } from '../interfaces/workflow-store.interface.js';
 import { WorkflowRegistry } from './workflow-registry.service.js';
-import { WorkflowScheduler, type ScheduleProduction } from './workflow-scheduler.service.js';
+import type { ScheduleProduction } from '../core/interfaces/scheduler-options.interface.js';
+import { WorkflowScheduler } from './workflow-scheduler.service.js';
 import { WORKFLOWS_MODULE_OPTIONS } from '../workflows.module-definition.js';
 import type { WorkflowsModuleOptions } from '../interfaces/workflows-module-options.interface.js';
 
@@ -130,7 +127,7 @@ export class WorkflowWorker implements OnApplicationBootstrap, OnModuleDestroy, 
   }
 
   /** Read at each use, never in the constructor: sources register while providers are created. */
-  private get store(): WorkflowStore {
+  private get store(): EncodedWorkflowStore {
     return this.storage[ENGINE_STORE];
   }
 

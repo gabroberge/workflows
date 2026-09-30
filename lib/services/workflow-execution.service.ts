@@ -52,7 +52,8 @@ import type { WorkflowJournalLimits } from '../interfaces/workflows-module-optio
 import type { WorkflowEvents } from '../events/workflow-events.service.js';
 import type { WorkflowEvent } from '../events/workflow-events.interface.js';
 import { signalName } from '../signals/workflow.signal.js';
-import type { NewWorkflowInstance, WorkflowSignalRecord, WorkflowStore } from '../interfaces/workflow-store.interface.js';
+import type { NewWorkflowInstance, WorkflowSignalRecord } from '../interfaces/workflow-store.interface.js';
+import type { WorkflowInstanceStore } from '../storage/encoded-workflow.store.js';
 
 /** An instance under a worker's lease. */
 export interface ClaimedWorkflowInstance extends WorkflowInstance {
@@ -79,7 +80,7 @@ type JournalKind = WorkflowJournalEntry['kind'];
 type RetrySetting = number | false | WorkflowRetryOptions | undefined;
 
 export interface ExecutionDeps {
-  store: WorkflowStore;
+  store: WorkflowInstanceStore;
   /** The workflow `ctx.startChild()` starts: its name, version and run timeout (`WorkflowRegistry.resolve()`). */
   resolve(workflow: Type<unknown> | string, version?: number): WorkflowMetadata;
   /**

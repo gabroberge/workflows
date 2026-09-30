@@ -27,6 +27,24 @@ export type { ResultOutcome, ResultWaiterOptions, ResultWaitOptions } from './in
 export { assertScheduleId, nextOccurrences, occurrenceId, parseSchedule } from './scheduling/index.js';
 export type { ScheduleMissed, ScheduleOccurrence, ScheduleOptions, ScheduleOverlap, ScheduleSpec, ScheduleTiming } from './interfaces/index.js';
 
+// Scheduling: the engine (one run per occurrence, declared schedules in step with the code) and the store it runs
+// on, which `scheduleStoreContract()` from `@nestjs/workflows/testing` checks
+export { InMemoryScheduleStore, Scheduler, type ScheduleFields } from './scheduling/index.js';
+export type {
+  DeclaredSchedule,
+  DueOccurrence,
+  ScheduleClaimRequest,
+  ScheduleProduction,
+  ScheduleQuery,
+  ScheduleRecord,
+  ScheduleSave,
+  ScheduleSkip,
+  ScheduleStore,
+  ScheduleWrite,
+  SchedulerLabels,
+  SchedulerOptions,
+} from './interfaces/index.js';
+
 // Workers: a claim-execute loop under leases, renewed on a heartbeat, drained at shutdown
 export { LeasedWorker } from './workers/index.js';
 export type { LeasedRun, LeasedWorkerOptions, LeaseRequest } from './interfaces/index.js';

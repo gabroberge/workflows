@@ -15,6 +15,9 @@ export const LOCK_STORAGE = Symbol('WorkflowStorage.lock');
 /** Internal: the store the engine uses, `source` with the module's codecs applied to the payloads. */
 export const ENGINE_STORE = Symbol('WorkflowStorage.engineStore');
 
+/** Internal: the module's codecs, for the schedules, which the engine encodes apart from the instances. */
+export const PAYLOAD_CODECS = Symbol('WorkflowStorage.payloadCodecs');
+
 const REQUIRED = [
   'create',
   'get',
@@ -107,6 +110,11 @@ export class WorkflowStorage {
       this[LOCK_STORAGE]();
     }
     return this.active!;
+  }
+
+  /** @internal The module's codecs. */
+  get [PAYLOAD_CODECS](): PayloadCodecs<WorkflowPayloadContext> {
+    return this.codecs;
   }
 
   /** @internal `source`, as the engine uses it: payloads encoded with the module's codecs on the way in, and decoded on the way out. */

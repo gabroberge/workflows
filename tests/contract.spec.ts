@@ -117,7 +117,7 @@ if (storeKind === 'memory') {
         override async claimSchedules(...[request]: Parameters<InMemoryWorkflowStore['claimSchedules']>) {
           const all = await this.listSchedules({ limit: 1_000, offset: 0 });
           for (const schedule of all) {
-            await this.writeSchedule(schedule.id, (this as any).schedules.get(schedule.id).leaseToken ?? '', { now: request.now, state: schedule.state, wakeAt: schedule.wakeAt, release: true });
+            await this.writeSchedule(schedule.id, (this as any).scheduleStore.schedules.get(schedule.id).leaseToken ?? '', { now: request.now, state: schedule.state, wakeAt: schedule.wakeAt, release: true });
           }
           return super.claimSchedules(request);
         }
@@ -126,7 +126,7 @@ if (storeKind === 'memory') {
       /** Takes any token for a schedule's lease. */
       class NoScheduleFence extends InMemoryWorkflowStore {
         override async writeSchedule(...[id, , write]: Parameters<InMemoryWorkflowStore['writeSchedule']>) {
-          const schedule = (this as any).schedules.get(id);
+          const schedule = (this as any).scheduleStore.schedules.get(id);
           return schedule ? super.writeSchedule(id, schedule.leaseToken ?? (schedule.leaseToken = 'any'), write) : false;
         }
       }
@@ -192,7 +192,7 @@ if (storeKind === 'memory') {
         'claim() takes the lowest priority first (none before any), then the most overdue, with or without limits',
       ]);
       expect(await failures(() => new NoScheduleLease())).toEqual([
-        'claimSchedules() leases due, unpaused, unleased schedules of the given workflows, most overdue first',
+        'claimSchedules() leases due, unpaused, unleased schedules of the given targets, most overdue first',
         'concurrent claimSchedules() never return the same schedule twice, and saves of one revision land once',
       ]);
       expect(await failures(() => new NoScheduleFence())).toEqual([

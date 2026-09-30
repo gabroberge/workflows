@@ -1,4 +1,8 @@
 import { Inject, Injectable, type Type } from '@nestjs/common';
+import type { ScheduleRecord } from '../core/interfaces/schedule-store.interface.js';
+import type { Scheduler } from '../core/scheduling/scheduler.js';
+import { assertScheduleId, nextOccurrences, parseSchedule } from '../core/scheduling/schedule-spec.js';
+import { systemClock } from '../core/time/clock.js';
 import { WorkflowNotFoundError } from '../errors/workflow-not-found.error.js';
 import { WorkflowStateError } from '../errors/workflow-state.error.js';
 import type { WorkflowClock } from '../interfaces/workflow-clock.interface.js';
@@ -10,17 +14,12 @@ import type {
   WorkflowSchedulePreviewOptions,
   WorkflowSchedulePreviewSpec,
 } from '../interfaces/workflow-schedule.interface.js';
-import type { WorkflowScheduleRecord } from '../interfaces/workflow-store.interface.js';
 import type { WorkflowsModuleOptions } from '../interfaces/workflows-module-options.interface.js';
-import type { EncodedWorkflowStore } from '../storage/encoded-workflow.store.js';
-import { ENGINE_STORE, WorkflowStorage } from '../storage/workflow.storage.js';
-import { systemClock } from '../core/time/clock.js';
 import { normalize } from '../utils/normalize.util.js';
-import { assertScheduleId, nextOccurrence, nextOccurrences, parseSchedule } from '../core/scheduling/schedule-spec.js';
-import { scheduleSpec, type WorkflowScheduleSpec as ScheduleSpec } from '../utils/schedule-spec.util.js';
+import { scheduleSpec, type WorkflowScheduleSpec } from '../utils/schedule-spec.util.js';
 import { WORKFLOWS_MODULE_OPTIONS } from '../workflows.module-definition.js';
 import { WorkflowRegistry } from './workflow-registry.service.js';
-import { limitReached, wakeAt, WorkflowScheduler, type ScheduleState } from './workflow-scheduler.service.js';
+import { WorkflowScheduler } from './workflow-scheduler.service.js';
 import { WorkflowWorker } from './workflow-worker.service.js';
 
 /**
@@ -33,7 +32,6 @@ export class WorkflowSchedules {
   private readonly clock: WorkflowClock;
 
   constructor(
-    private readonly storage: WorkflowStorage,
     @Inject(WORKFLOWS_MODULE_OPTIONS) options: WorkflowsModuleOptions,
     private readonly registry: WorkflowRegistry,
     private readonly scheduler: WorkflowScheduler,
@@ -42,9 +40,9 @@ export class WorkflowSchedules {
     this.clock = options.clock ?? systemClock;
   }
 
-  /** Read at each call, never in the constructor: sources register while providers are created. */
-  private get store(): EncodedWorkflowStore {
-    return this.storage[ENGINE_STORE];
+  /** The core's engine of schedules, over the registered store's. */
+  private get engine(): Scheduler<WorkflowScheduleSpec> {
+    return this.scheduler.engine;
   }
 
   /**
@@ -74,15 +72,15 @@ export class WorkflowSchedules {
       throw new TypeError(`${owner}: its input is not JSON-serializable: ${(error as Error).message}`);
     }
 
-    const saved = await this.scheduler.modify(
+    const saved = await this.engine.save(
       id,
       (current) => {
         if (current?.declared) {
           throw declaredError(current);
         }
-        return this.scheduler.fields(current, { workflow: workflow.name, declared: false, spec, input });
+        return this.engine.changed(current, { target: workflow.name, declared: false, spec, payload: input });
       },
-      { read: (id) => this.scheduler.readReplacing(id) },
+      { replacing: true },
     );
     this.worker.kick();
     return this.scheduler.view(saved!);
@@ -90,7 +88,7 @@ export class WorkflowSchedules {
 
   /** The schedule, or `null` for an unknown id. */
   async get(id: string): Promise<WorkflowSchedule | null> {
-    const record = await this.store.getSchedule(id);
+    const record = await this.engine.read(id);
     return record ? this.scheduler.view(record) : null;
   }
 
@@ -106,7 +104,7 @@ export class WorkflowSchedules {
     }
 
     // Read as stored, then decoded one by one: one whose input no codec can read any more doesn't hide the others.
-    const records = await this.store.inner.listSchedules({ limit, offset, ...(filter.workflow !== undefined ? { workflow: filter.workflow } : {}) });
+    const records = await this.engine.store.listSchedules({ limit, offset, ...(filter.workflow !== undefined ? { target: filter.workflow } : {}) });
     return Promise.all(records.map((record) => this.scheduler.readableView(record)));
   }
 
@@ -115,14 +113,14 @@ export class WorkflowSchedules {
    * `WorkflowStateError` for a schedule a workflow declares: remove it from the code, or `pause()` it.
    */
   async remove(id: string): Promise<boolean> {
-    const record = await this.store.inner.getSchedule(id);
+    const record = await this.engine.store.getSchedule(id);
     if (!record) {
       return false;
     }
     if (record.declared) {
       throw declaredError(record);
     }
-    return this.store.deleteSchedule(id);
+    return this.engine.store.deleteSchedule(id);
   }
 
   /**
@@ -131,17 +129,11 @@ export class WorkflowSchedules {
    * schedule stays paused across deploys. Throws `WorkflowNotFoundError` for an unknown id.
    */
   async pause(id: string): Promise<WorkflowSchedule> {
-    const saved = await this.scheduler.modify(
-      id,
-      (current) => {
-        if (!current) {
-          throw notFound(id);
-        }
-        return current.paused ? null : { ...fieldsOf(current), paused: true, releaseLease: true };
-      },
-      { asStored: true },
-    );
-    return this.scheduler.readableView(saved!);
+    const saved = await this.engine.pause(id);
+    if (!saved) {
+      throw notFound(id);
+    }
+    return this.scheduler.readableView(saved);
   }
 
   /**
@@ -149,26 +141,12 @@ export class WorkflowSchedules {
    * whatever `missed` says. Throws `WorkflowNotFoundError` for an unknown id.
    */
   async resume(id: string): Promise<WorkflowSchedule> {
-    const now = this.clock.now();
-    const saved = await this.scheduler.modify(
-      id,
-      (current) => {
-        if (!current) {
-          throw notFound(id);
-        }
-        if (!current.paused) {
-          return null;
-        }
-
-        const spec = current.spec as ScheduleSpec;
-        const previous = current.state as ScheduleState;
-        const state: ScheduleState = { ...previous, next: limitReached(spec, previous.runs) ? null : nextOccurrence(spec, now) };
-        return { ...fieldsOf(current), paused: false, state, wakeAt: wakeAt(state, now), releaseLease: true };
-      },
-      { asStored: true },
-    );
+    const saved = await this.engine.resume(id);
+    if (!saved) {
+      throw notFound(id);
+    }
     this.worker.kick();
-    return this.scheduler.readableView(saved!);
+    return this.scheduler.readableView(saved);
   }
 
   /**
@@ -177,19 +155,19 @@ export class WorkflowSchedules {
    * occurrences after it. Throws `WorkflowNotFoundError` for an unknown id.
    */
   async trigger(id: string): Promise<WorkflowStartResult> {
-    const record = await this.store.getSchedule(id);
+    const record = await this.engine.read(id);
     if (!record) {
       throw notFound(id);
     }
 
-    const spec = record.spec as ScheduleSpec;
-    const declared = record.declared ? this.registry.schedules().get(id) : undefined;
+    const spec = record.spec as WorkflowScheduleSpec;
+    const declared = record.declared ? this.scheduler.declaration(id) : undefined;
     if (spec.inputFn && !declared) {
       throw new TypeError(
-        `Schedule "${id}" computes its input with a function, which this process doesn't declare: trigger it from one that registers workflow "${record.workflow}".`,
+        `Schedule "${id}" computes its input with a function, which this process doesn't declare: trigger it from one that registers workflow "${record.target}".`,
       );
     }
-    const workflow = this.registry.resolve(record.workflow, spec.version ?? undefined);
+    const workflow = this.registry.resolve(record.target, spec.version ?? undefined);
     const now = this.clock.now();
     const { instance, created } = (await this.scheduler.startOccurrence(record, spec, declared, workflow, now, now, true))!;
     if (created) {
@@ -218,26 +196,21 @@ export class WorkflowSchedules {
       return nextOccurrences(parseSchedule({ cron, every, rrule, tz, startAt, endAt, limit }, 'schedules.preview()'), { from, count }, 'schedules.preview()');
     }
 
-    const record = await this.store.inner.getSchedule(schedule);
+    const record = await this.engine.store.getSchedule(schedule);
     if (!record) {
       throw notFound(schedule);
     }
-    return nextOccurrences(record.spec as ScheduleSpec, { from, count, runs: (record.state as ScheduleState).runs }, 'schedules.preview()');
+    return nextOccurrences(record.spec as WorkflowScheduleSpec, { from, count, runs: this.engine.progress(record).runs }, 'schedules.preview()');
   }
-}
-
-function fieldsOf(record: WorkflowScheduleRecord) {
-  const { workflow, declared, spec, input, paused, wakeAt, state } = record;
-  return { workflow, declared, spec, input, paused, wakeAt, state };
 }
 
 function notFound(id: string): WorkflowNotFoundError {
   return new WorkflowNotFoundError(`No workflow schedule with id "${id}".`);
 }
 
-function declaredError(record: WorkflowScheduleRecord): WorkflowStateError {
+function declaredError(record: ScheduleRecord): WorkflowStateError {
   return new WorkflowStateError(
-    `Schedule "${record.id}" is declared by workflow "${record.workflow}" (@Workflow(name, { schedules })): change or remove it there. ` +
+    `Schedule "${record.id}" is declared by workflow "${record.target}" (@Workflow(name, { schedules })): change or remove it there. ` +
       'pause(), resume() and trigger() work on it.',
   );
 }

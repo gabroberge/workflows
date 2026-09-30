@@ -2,6 +2,7 @@ import { Logger } from '@nestjs/common';
 import type { WorkflowPayloadContext } from '../interfaces/workflow-payload-codec.interface.js';
 import { isEncodedPayload as encoded, type PayloadCodecs } from '../core/codecs/payload-codecs.js';
 import { andThen, toPromise, type Maybe } from '../core/utils/maybe.util.js';
+import type { WorkflowScheduleMethods } from '../utils/schedule-store.util.js';
 import type { WorkflowInstance, WorkflowJournalEntry, WorkflowStatus } from '../interfaces/workflow-instance.interface.js';
 import type {
   NewWorkflowInstance,
@@ -14,11 +15,6 @@ import type {
   WorkflowPurgeQuery,
   WorkflowPurgeResult,
   WorkflowReopen,
-  WorkflowScheduleClaimRequest,
-  WorkflowScheduleQuery,
-  WorkflowScheduleRecord,
-  WorkflowScheduleSave,
-  WorkflowScheduleWrite,
   WorkflowSignalQuery,
   WorkflowSignalRecord,
   WorkflowSignalResult,
@@ -26,12 +22,15 @@ import type {
   WorkflowWrite,
 } from '../interfaces/workflow-store.interface.js';
 
+/** @internal A `WorkflowStore` without its schedules, which the engine reaches through the core's `Scheduler`. */
+export type WorkflowInstanceStore = Omit<WorkflowStore, WorkflowScheduleMethods>;
+
 /**
  * @internal The store as the engine sees it with a codec: payloads encoded on the way in, decoded on the way out, so
  * the store sees only what the codec returns, and the engine only plain values. Ids, names, keys, statuses and
- * times pass as they are: the store matches on them.
+ * times pass as they are: the store matches on them. Schedules aren't here: the `Scheduler` encodes their inputs.
  */
-export class EncodedWorkflowStore implements WorkflowStore {
+export class EncodedWorkflowStore implements WorkflowInstanceStore {
   private static readonly logger = new Logger('Workflows');
   private readonly unreadable = new Set<string>();
   readonly createInTransaction?: WorkflowStore['createInTransaction'];
@@ -106,36 +105,6 @@ export class EncodedWorkflowStore implements WorkflowStore {
 
   purge(query: WorkflowPurgeQuery): Promise<WorkflowPurgeResult> {
     return this.inner.purge(query);
-  }
-
-  async saveSchedule(save: WorkflowScheduleSave): Promise<WorkflowScheduleRecord | null> {
-    const input = await this.codecs.encode(save.input, { field: 'input', schedule: save.id });
-    const saved = await this.inner.saveSchedule({ ...save, input });
-    return saved && this.decodeSchedule(saved);
-  }
-
-  async getSchedule(id: string): Promise<WorkflowScheduleRecord | null> {
-    const record = await this.inner.getSchedule(id);
-    return record && this.decodeSchedule(record);
-  }
-
-  async listSchedules(query: WorkflowScheduleQuery): Promise<WorkflowScheduleRecord[]> {
-    return Promise.all((await this.inner.listSchedules(query)).map((record) => this.decodeSchedule(record)));
-  }
-
-  deleteSchedule(id: string, revision?: number): Promise<boolean> {
-    return this.inner.deleteSchedule(id, revision);
-  }
-
-  async claimSchedules(request: WorkflowScheduleClaimRequest): Promise<WorkflowScheduleRecord[]> {
-    return this.readable(await this.inner.claimSchedules(request), (record) => this.decodeSchedule(record), 'Schedule', async (record) => {
-      // Handed back untouched, due when its lease would have ended.
-      await this.inner.writeSchedule(record.id, request.token, { now: request.now, state: record.state, wakeAt: request.leaseUntil, release: true });
-    });
-  }
-
-  writeSchedule(id: string, token: string, write: WorkflowScheduleWrite): Promise<boolean> {
-    return this.inner.writeSchedule(id, token, write);
   }
 
   async claim(request: WorkflowClaimRequest): Promise<WorkflowClaim> {
@@ -260,11 +229,6 @@ export class EncodedWorkflowStore implements WorkflowStore {
       this.codecs.decode(instance.cancelReason, context('cancelReason')),
     ]);
     return { ...instance, input, ...('output' in instance ? { output } : {}), error, customStatus, cancelReason: cancelReason as string | null };
-  }
-
-  /** A schedule as stored, with its input decoded. Throws if no listed codec can decode it. */
-  async decodeSchedule(record: WorkflowScheduleRecord): Promise<WorkflowScheduleRecord> {
-    return encoded(record.input) ? { ...record, input: await this.codecs.decode(record.input, { field: 'input', schedule: record.id }) } : record;
   }
 
   private async instanceOf(stored: Maybe<{ instance: WorkflowInstance; created: boolean }>): Promise<{ instance: WorkflowInstance; created: boolean }> {
