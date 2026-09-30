@@ -8,6 +8,9 @@
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "bin": {
+    "nest-workflows": "./dist/postgres/cli.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
