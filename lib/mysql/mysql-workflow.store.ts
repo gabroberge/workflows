@@ -64,10 +64,7 @@ const concurrencyLock = (workflow: string) => `concurrency:${workflow}`;
 const RUNNABLE = `(${RUNNABLE_STATUSES.map((status) => `'${status}'`).join(', ')})`;
 const CANCELLABLE = `(${CANCELLABLE_STATUSES.map((status) => `'${status}'`).join(', ')})`;
 
-/**
- * How many rounds of candidates a claim tries, passing over those other claims hold (see `lockDue()`): the k-th of
- * claims that run at once needs k rounds to find rows no other one took.
- */
+/** How many rounds of candidates a claim tries at most, passing over those other claims hold (see `lockDue()`). */
 const CLAIM_ROUNDS = 10;
 
 /** The rows of one multi-row insert (Prisma prepares statements on the server: 65,535 placeholders at most). */
@@ -722,20 +719,29 @@ SET rl.window_end = v.window_end, rl.\`count\` = v.\`count\``,
    * Locks up to `limit` rows of `table` (as `alias`) that `due` selects, in `order`, passing over the rows other
    * transactions hold, as PostgreSQL's `FOR UPDATE SKIP LOCKED` under `ORDER BY ... LIMIT` does. InnoDB's own locks
    * every row its sort reads, not only those it returns (a claim of 7 among 60 due instances held all 60, and a
-   * concurrent claim found none), so: a consistent read finds the candidates (locking nothing, whatever the plan), and a
-   * locking read by primary key takes those still due that no one holds (`SKIP LOCKED`). Candidates another claim took
-   * are passed over, and the next ones tried, round after round (`CLAIM_ROUNDS`). Resolves to the ids locked.
+   * concurrent claim found none), so each round:
+   *
+   * 1. a consistent read finds the next candidates in `order` (it locks nothing, whatever the plan): as many as the rows
+   *    still wanted, and as many more as other transactions held in the rounds before, so a round reaches past the rows
+   *    the claims beside this one are taking;
+   * 2. a locking read takes those still due that no one holds (`SKIP LOCKED`), by primary key and in its order, up to the
+   *    rows wanted: InnoDB stops there, and locks no candidate it doesn't return. (Among the candidates of a round, the
+   *    ones taken are the first free by id: under contention, a claim may take a less overdue one than another claim.)
+   *
+   * Resolves to the ids locked.
    */
   private async lockDue(tx: SqlTransaction, table: string, alias: string, due: (p: SqlParams) => string, order: string, limit: number): Promise<string[]> {
     const locked: string[] = [];
     const tried: string[] = [];
+    let held = 0;
     for (let round = 0; round < CLAIM_ROUNDS && locked.length < limit; round++) {
       const wanted = limit - locked.length;
+      const batch = wanted + held;
       const p = new SqlParams();
       const candidates = await tx.query<Row>(
         `SELECT CAST(${alias}.id AS CHAR) AS id FROM ${table} ${alias}
 WHERE ${due(p)}${tried.length > 0 ? ` AND NOT (${p.in(`${alias}.id`, tried)})` : ''}
-ORDER BY ${order} LIMIT ${p.limit(wanted)}`,
+ORDER BY ${order} LIMIT ${p.limit(batch)}`,
         p.values,
       );
       if (candidates.length === 0) {
@@ -746,11 +752,13 @@ ORDER BY ${order} LIMIT ${p.limit(wanted)}`,
       tried.push(...ids);
       const q = new SqlParams();
       const rows = await tx.query<Row>(
-        `SELECT CAST(${alias}.id AS CHAR) AS id FROM ${table} ${alias} FORCE INDEX (PRIMARY) WHERE ${q.in(`${alias}.id`, ids)} AND ${due(q)} FOR UPDATE SKIP LOCKED`,
+        `SELECT CAST(${alias}.id AS CHAR) AS id FROM ${table} ${alias} FORCE INDEX (PRIMARY)
+WHERE ${q.in(`${alias}.id`, ids)} AND ${due(q)} ORDER BY ${alias}.id LIMIT ${q.limit(wanted)} FOR UPDATE SKIP LOCKED`,
         q.values,
       );
       locked.push(...rows.map((row) => row.id!));
-      if (candidates.length < wanted) {
+      held += candidates.length - rows.length;
+      if (candidates.length < batch) {
         break;
       }
     }

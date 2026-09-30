@@ -6,6 +6,7 @@
  * - claims under a concurrency limit take the workflow's lock before counting: a claim that ran while another was
  *   leasing, and saw a new, more urgent instance, never leases past the limit (SKIP LOCKED alone lets it through: the
  *   two claims lease different rows);
+ * - a claim reaches past the rows another claim is taking: its rounds of candidates widen by the rows it found held;
  * - the kit's lock table keeps one row per lock key the store takes, a bounded few, however much work goes through it,
  *   and the store creates the signal lock's row at startup, in a transaction of its own: had the application's
  *   transaction created it and rolled back, the signals waiting for it would deadlock.
@@ -81,7 +82,7 @@ describe.each(clients)('MySqlWorkflowStore through $name on MySQL', (factory) =>
     // The first claim stops after it picked its instances (a, b), before it leases them.
     const picked = deferred();
     const proceed = deferred();
-    const paused = new MySqlWorkflowStore({ executor: pausing(client!.executor, picked.resolve, proceed.promise), schema, migrate: false });
+    const paused = new MySqlWorkflowStore({ executor: pausing(client!.executor, (text) => text.startsWith('WITH limits AS'), picked.resolve, proceed.promise), schema, migrate: false });
     const first = claim(paused, 'first');
     await picked.promise;
 
@@ -95,6 +96,27 @@ describe.each(clients)('MySqlWorkflowStore through $name on MySQL', (factory) =>
     expect((await second).instances).toEqual([]);
     expect(settled).toBe('second waiting');
     expect((await store.list({ limit: 10, offset: 0 })).filter((instance) => instance.leaseUntil === FAR).map((instance) => instance.id)).toEqual(['a', 'b']);
+  });
+
+  it('claims past the rows another claim is taking: one of one, while ten are held', async () => {
+    for (let i = 0; i < 20; i++) {
+      await create(`i${String(i).padStart(2, '0')}`, { now: i });
+    }
+    const claim = (s: MySqlWorkflowStore, token: string, limit: number) => s.claim({ owner: token, token, now: 100, leaseUntil: FAR, limit, workflows: [W] });
+
+    // The first claim stops once it has locked its ten, before it leases them.
+    const locked = deferred();
+    const proceed = deferred();
+    const lockedTen = (text: string) => text.includes('FORCE INDEX (PRIMARY)') && text.includes('FOR UPDATE SKIP LOCKED');
+    const paused = new MySqlWorkflowStore({ executor: pausing(client!.executor, lockedTen, locked.resolve, proceed.promise), schema, migrate: false });
+    const first = claim(paused, 'first', 10);
+    await locked.promise;
+    try {
+      expect((await claim(store, 'second', 1)).instances.map((instance) => instance.id)).toEqual(['i10']);
+    } finally {
+      proceed.resolve();
+    }
+    expect((await first).instances.map((instance) => instance.id)).toEqual(Array.from({ length: 10 }, (_, i) => `i0${i}`));
   });
 
   it("lets signals waiting for one whose transaction rolls back go on, the signal lock's row created at startup", async () => {
@@ -185,10 +207,11 @@ function deferred() {
 }
 
 /**
- * `executor`, whose transactions stop after the statement that picks a claim's instances under limits (`picked()`),
- * until `proceed` settles.
+ * `executor`, whose transactions stop after the first statement that `at` matches (`reached()`), until `proceed`
+ * settles.
  */
-function pausing(executor: SqlExecutor, picked: () => void, proceed: Promise<void>): SqlExecutor {
+function pausing(executor: SqlExecutor, at: (text: string) => boolean, reached: () => void, proceed: Promise<void>): SqlExecutor {
+  let stopped = false;
   return {
     dialect: executor.dialect,
     query: (text, params) => executor.query(text, params),
@@ -200,8 +223,9 @@ function pausing(executor: SqlExecutor, picked: () => void, proceed: Promise<voi
           work({
             query: async <R extends object>(text: string, params?: readonly unknown[]) => {
               const rows = await tx.query<R>(text, params);
-              if (text.startsWith('WITH limits AS')) {
-                picked();
+              if (!stopped && at(text)) {
+                stopped = true;
+                reached();
                 await proceed;
               }
               return rows;
