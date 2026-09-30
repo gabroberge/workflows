@@ -9,7 +9,7 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "nest-workflows": "./dist/postgres/cli.js"
+    "nest-workflows": "./dist/cli.js"
   },
   "exports": {
     ".": {
@@ -31,6 +31,11 @@
       "types": "./dist/postgres/index.d.ts",
       "import": "./dist/postgres/index.js",
       "default": "./dist/postgres/index.js"
+    },
+    "./mysql": {
+      "types": "./dist/mysql/index.d.ts",
+      "import": "./dist/mysql/index.js",
+      "default": "./dist/mysql/index.js"
     },
     "./core": {
       "types": "./dist/core/index.d.ts",
