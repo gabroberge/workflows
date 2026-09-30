@@ -5,7 +5,7 @@
  * America/New_York skips 02:00-03:00 on 8 March and repeats 01:00-02:00 on 1 November; Australia/Lord_Howe repeats
  * 01:30-02:00 on 5 April and skips 02:00-02:30 on 4 October.
  */
-import { cronOccurrences, nextCron, parseCron, type CronExpression } from '../lib/utils/cron.util.js';
+import { cronOccurrences, nextCron, parseCron, type CronExpression } from '../../lib/core/scheduling/cron.util.js';
 
 const MINUTE = 60_000;
 const WARSAW = 'Europe/Warsaw';

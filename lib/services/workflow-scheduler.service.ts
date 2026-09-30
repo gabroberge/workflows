@@ -10,10 +10,11 @@ import type { WorkflowScheduleRecord, WorkflowScheduleSave } from '../interfaces
 import type { WorkflowsModuleOptions } from '../interfaces/workflows-module-options.interface.js';
 import type { EncodedWorkflowStore } from '../storage/encoded-workflow.store.js';
 import { ENGINE_STORE, WorkflowStorage } from '../storage/workflow.storage.js';
-import { canonical } from '../utils/canonical.util.js';
+import { canonical } from '../core/utils/canonical.util.js';
 import { systemClock } from '../core/time/clock.js';
 import { newInstance } from '../utils/new-instance.util.js';
-import { latestOccurrences, nextOccurrence, sameTiming, type ScheduleSpec } from '../utils/schedule-spec.util.js';
+import { latestOccurrences, nextOccurrence, occurrenceId, sameTiming } from '../core/scheduling/schedule-spec.js';
+import type { WorkflowScheduleSpec as ScheduleSpec } from '../utils/schedule-spec.util.js';
 import { WORKFLOWS_MODULE_OPTIONS } from '../workflows.module-definition.js';
 import { WorkflowRegistry } from './workflow-registry.service.js';
 
@@ -79,11 +80,6 @@ function declaration({ declaredBy: _declaredBy, confirmedAt: _confirmedAt, ...sp
 function confirmed(record: WorkflowScheduleRecord, now: number): boolean {
   const { confirmedAt } = record.spec as DeclaredSpec;
   return confirmedAt !== undefined && now - confirmedAt < STALE_MS;
-}
-
-/** The id of the instance an occurrence starts: the same wherever and however often it is started. */
-export function occurrenceId(schedule: string, at: number): string {
-  return `${schedule}@${new Date(at).toISOString()}`;
 }
 
 /**

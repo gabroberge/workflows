@@ -22,6 +22,11 @@ export type { ConcurrencyLimit, RateLimit, RateWindow, RateWindowState, Resolved
 export { ResultWaiter } from './results/index.js';
 export type { ResultOutcome, ResultWaiterOptions, ResultWaitOptions } from './interfaces/index.js';
 
+// Scheduling: schedule specs (cron with seconds, every, rrule, time zones, bounds, missed and overlap policies),
+// their occurrences, and the ids of the runs they start
+export { assertScheduleId, nextOccurrences, occurrenceId, parseSchedule } from './scheduling/index.js';
+export type { ScheduleMissed, ScheduleOccurrence, ScheduleOptions, ScheduleOverlap, ScheduleSpec, ScheduleTiming } from './interfaces/index.js';
+
 // Workers: a claim-execute loop under leases, renewed on a heartbeat, drained at shutdown
 export { LeasedWorker } from './workers/index.js';
 export type { LeasedRun, LeasedWorkerOptions, LeaseRequest } from './interfaces/index.js';

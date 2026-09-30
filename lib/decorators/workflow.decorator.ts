@@ -2,7 +2,8 @@ import { applyDecorators, Injectable, SetMetadata } from '@nestjs/common';
 import { resolveConcurrency, resolveRateLimit } from '../core/limits/limits.js';
 import { runTimeoutMs } from '../utils/run-timeout.util.js';
 import { normalize } from '../utils/normalize.util.js';
-import { SCHEDULE_ID, scheduleSpec } from '../utils/schedule-spec.util.js';
+import { assertScheduleId } from '../core/scheduling/schedule-spec.js';
+import { scheduleSpec } from '../utils/schedule-spec.util.js';
 import { WORKFLOW_METADATA } from '../workflows.constants.js';
 import type { WorkflowDeclaredSchedule, WorkflowMetadata, WorkflowDecoratorOptions } from '../interfaces/workflow-decorator-options.interface.js';
 import type { WorkflowScheduleDeclaration } from '../interfaces/workflow-schedule.interface.js';
@@ -37,9 +38,7 @@ function schedulesOf(name: string, schedules: WorkflowScheduleDeclaration[]): Wo
   const ids = new Set<string>();
   return schedules.map((declaration) => {
     const id = declaration?.id;
-    if (typeof id !== 'string' || !SCHEDULE_ID.test(id)) {
-      throw new TypeError(`Invalid schedule id ${JSON.stringify(id)} of workflow "${name}". Use letters, digits, ".", ":", "_" or "-".`);
-    }
+    assertScheduleId(id, `workflow "${name}"`);
     if (ids.has(id)) {
       throw new TypeError(`Workflow "${name}" declares schedule "${id}" twice.`);
     }

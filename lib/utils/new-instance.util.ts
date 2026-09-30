@@ -3,7 +3,7 @@ import type { WorkflowMetadata } from '../interfaces/workflow-decorator-options.
 import type { WorkflowInstance, WorkflowParentClose } from '../interfaces/workflow-instance.interface.js';
 import type { NewWorkflowInstance } from '../interfaces/workflow-store.interface.js';
 import { assertPriority } from '../core/limits/limits.js';
-import { canonical } from './canonical.util.js';
+import { canonical } from '../core/utils/canonical.util.js';
 import type { Duration } from '../core/time/duration.js';
 import { runTimeoutMs } from './run-timeout.util.js';
 import { normalize } from './normalize.util.js';

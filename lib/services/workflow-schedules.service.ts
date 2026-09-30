@@ -16,7 +16,8 @@ import type { EncodedWorkflowStore } from '../storage/encoded-workflow.store.js'
 import { ENGINE_STORE, WorkflowStorage } from '../storage/workflow.storage.js';
 import { systemClock } from '../core/time/clock.js';
 import { normalize } from '../utils/normalize.util.js';
-import { nextOccurrence, occurrences, previewSpec, SCHEDULE_ID, scheduleSpec, type ScheduleSpec } from '../utils/schedule-spec.util.js';
+import { assertScheduleId, nextOccurrence, nextOccurrences, parseSchedule } from '../core/scheduling/schedule-spec.js';
+import { scheduleSpec, type WorkflowScheduleSpec as ScheduleSpec } from '../utils/schedule-spec.util.js';
 import { WORKFLOWS_MODULE_OPTIONS } from '../workflows.module-definition.js';
 import { WorkflowRegistry } from './workflow-registry.service.js';
 import { limitReached, wakeAt, WorkflowScheduler, type ScheduleState } from './workflow-scheduler.service.js';
@@ -54,7 +55,7 @@ export class WorkflowSchedules {
    * `TypeError` for invalid options.
    */
   async upsert<W>(id: string, schedule: UpsertWorkflowScheduleOptions<W>): Promise<WorkflowSchedule> {
-    assertId(id);
+    assertScheduleId(id);
     const owner = `Schedule "${id}"`;
     if (schedule === null || typeof schedule !== 'object') {
       throw new TypeError(`${owner}: expected options with workflow and cron, every or rrule.`);
@@ -212,34 +213,16 @@ export class WorkflowSchedules {
       throw new TypeError(`schedules.preview(): invalid from ${String(options.from)}. Pass a valid Date or a timestamp in milliseconds.`);
     }
 
-    let spec: ScheduleSpec;
-    let left = Infinity;
-    if (typeof schedule === 'string') {
-      const record = await this.store.inner.getSchedule(schedule);
-      if (!record) {
-        throw notFound(schedule);
-      }
-      spec = record.spec as ScheduleSpec;
-      left = spec.limit === null ? Infinity : spec.limit - (record.state as ScheduleState).runs;
-    } else {
-      spec = previewSpec('schedules.preview()', schedule);
-      left = spec.limit ?? Infinity;
+    if (typeof schedule !== 'string') {
+      const { cron, every, rrule, tz, startAt, endAt, limit } = schedule;
+      return nextOccurrences(parseSchedule({ cron, every, rrule, tz, startAt, endAt, limit }, 'schedules.preview()'), { from, count }, 'schedules.preview()');
     }
 
-    const times: number[] = [];
-    for (const at of occurrences(spec, from)) {
-      if (times.length >= Math.min(count, left)) {
-        break;
-      }
-      times.push(at);
+    const record = await this.store.inner.getSchedule(schedule);
+    if (!record) {
+      throw notFound(schedule);
     }
-    return times;
-  }
-}
-
-function assertId(id: unknown): asserts id is string {
-  if (typeof id !== 'string' || !SCHEDULE_ID.test(id)) {
-    throw new TypeError(`Invalid schedule id ${JSON.stringify(id)}. Use letters, digits, ".", ":", "_" or "-".`);
+    return nextOccurrences(record.spec as ScheduleSpec, { from, count, runs: (record.state as ScheduleState).runs }, 'schedules.preview()');
   }
 }
 

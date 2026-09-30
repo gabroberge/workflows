@@ -1,6 +1,6 @@
 import type { ConcurrencyLimit, RateLimit, RateWindow, ResolvedConcurrency, ResolvedRateLimit } from '../core/interfaces/limits.interface.js';
 import type { Duration } from '../core/time/duration.js';
-import type { ScheduleSpec } from '../utils/schedule-spec.util.js';
+import type { WorkflowScheduleSpec } from '../utils/schedule-spec.util.js';
 import type { WorkflowScheduleDeclaration } from './workflow-schedule.interface.js';
 
 export interface WorkflowMetadata {
@@ -19,7 +19,7 @@ export interface WorkflowMetadata {
 /** One of `@Workflow(name, { schedules })`, validated: its spec (as the store keeps it) and its input. */
 export interface WorkflowDeclaredSchedule {
   id: string;
-  spec: ScheduleSpec;
+  spec: WorkflowScheduleSpec;
   /** A JSON value (normalized), or a function of the occurrence. */
   input: unknown;
 }

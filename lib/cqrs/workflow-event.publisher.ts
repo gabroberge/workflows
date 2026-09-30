@@ -1,7 +1,7 @@
 import { Injectable, Logger, type OnApplicationBootstrap, type OnModuleInit } from '@nestjs/common';
 import { EventBus, UnhandledExceptionBus, type AsyncContext, type IEvent, type IEventPublisher } from '@nestjs/cqrs';
 import { WorkflowClient } from '../services/workflow-client.service.js';
-import { canonical } from '../utils/canonical.util.js';
+import { canonical } from '../core/utils/canonical.util.js';
 import { isPriority, MAX_PRIORITY } from '../core/limits/limits.js';
 import { normalize } from '../utils/normalize.util.js';
 import { ROUTE_EVENTS, WorkflowRegistry } from '../services/workflow-registry.service.js';

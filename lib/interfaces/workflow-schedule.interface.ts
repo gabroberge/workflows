@@ -1,5 +1,5 @@
 import type { Type } from '@nestjs/common';
-import type { Duration } from '../core/time/duration.js';
+import type { ScheduleMissed, ScheduleOccurrence, ScheduleOptions, ScheduleOverlap, ScheduleTiming } from '../core/interfaces/schedule.interface.js';
 import type { WorkflowInput } from './workflow-runner.interface.js';
 
 /**
@@ -8,64 +8,30 @@ import type { WorkflowInput } from './workflow-runner.interface.js';
  * that much later (02:30 runs at 03:30); on the day they go back, a time that happens twice runs once, the
  * first time. For a fixed interval whatever the clocks do, use `every` (or `tz: 'UTC'`).
  */
-export interface WorkflowScheduleTiming {
-  /**
-   * A cron expression: 5 fields (minute, hour, day of month, month, day of week) or 6 (seconds first), such as
-   * `'0 8 * * MON'` or `'0 0 8 * * MON'`. Ranges, steps, lists, names (`JAN`, `MON-FRI`), `L` (the last day of
-   * the month; `5L` the last Friday), `#` (`1#2`: the second Monday) and `@daily`-style nicknames. When both
-   * the day of month and the day of week are restricted, a day matching either runs, as in cron.
-   */
-  cron?: string;
-  /** A fixed interval of at least a second, counted from `startAt` (default: the Unix epoch), whatever `tz` says. */
-  every?: Duration;
-  /**
-   * An RFC 5545 recurrence rule: FREQ, INTERVAL, COUNT, UNTIL, WKST, BYMONTH, BYMONTHDAY, BYDAY (with ordinals:
-   * `-1FR`), BYHOUR, BYMINUTE and BYSECOND, such as `'FREQ=MONTHLY;BYDAY=-1FR;BYHOUR=17'`. `startAt` is its
-   * DTSTART (default: midnight, 1 January 1970, in `tz`), whose fields fill the parts the rule leaves out (so
-   * give BYHOUR and BYMINUTE), and COUNT counts from it (so COUNT needs a `startAt`).
-   */
-  rrule?: string;
-  /** The IANA time zone of `cron` and `rrule`, such as `'Europe/Warsaw'`. Default `'UTC'`. */
-  tz?: string;
-  /** No occurrence before it. With `every`, the first occurrence; with `rrule`, its DTSTART. */
-  startAt?: Date | number;
-  /** No occurrence after it. */
-  endAt?: Date | number;
-}
+export type WorkflowScheduleTiming = ScheduleTiming;
 
 /**
  * What a schedule does with occurrences no worker was up to start (a deploy, an outage): `'skip'` them (only an
  * occurrence found within a minute of its time starts), start the latest of them `'once'`, or start `'all'` of
  * them at once (the latest 100 at most; it needs `overlap: 'allow'`).
  */
-export type WorkflowScheduleMissed = 'skip' | 'once' | 'all';
+export type WorkflowScheduleMissed = ScheduleMissed;
 
 /**
  * What an occurrence does while an instance the schedule started is still running: `'skip'` it, `'allow'` it
  * (both run), `'cancel-previous'` (the running one is cancelled, and compensates, while the new one starts), or
  * `'buffer-one'` (it starts once the running one ends; one occurrence waits at most, later ones are skipped).
  */
-export type WorkflowScheduleOverlap = 'skip' | 'allow' | 'cancel-previous' | 'buffer-one';
+export type WorkflowScheduleOverlap = ScheduleOverlap;
 
 /** What `@Workflow(name, { schedules })` and `WorkflowSchedules.upsert()` share. */
-export interface WorkflowScheduleOptions extends WorkflowScheduleTiming {
-  /** The most occurrences it starts, after which it ends. Default: none. */
-  limit?: number;
-  /** Default `'skip'`. */
-  missed?: WorkflowScheduleMissed;
-  /** Default `'skip'`. */
-  overlap?: WorkflowScheduleOverlap;
+export interface WorkflowScheduleOptions extends ScheduleOptions {
   /** The priority of the instances it starts, as `WorkflowClient.start()`'s. Default: none. */
   priority?: number;
 }
 
 /** An occurrence of a schedule: what a declared schedule's `input` function receives, and `ctx.schedule`. */
-export interface WorkflowScheduleOccurrence {
-  /** The schedule's id. */
-  id: string;
-  /** When the occurrence was due (epoch milliseconds), also when it starts later (`missed`, `'buffer-one'`) or was triggered (then: when). */
-  at: number;
-}
+export type WorkflowScheduleOccurrence = ScheduleOccurrence;
 
 /** One entry of `@Workflow(name, { schedules })`. */
 export interface WorkflowScheduleDeclaration<I = any> extends WorkflowScheduleOptions {

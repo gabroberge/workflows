@@ -46,7 +46,7 @@ import type { WorkflowRetryOptions } from '../interfaces/workflow-retry-options.
 import { nextRetry, resolveRetry } from '../core/retries/retry.js';
 import type { ResolvedRetry } from '../core/interfaces/retry-settings.interface.js';
 import { entryBytes } from '../utils/journal-limits.util.js';
-import { canonical } from '../utils/canonical.util.js';
+import { canonical } from '../core/utils/canonical.util.js';
 import { normalize } from '../utils/normalize.util.js';
 import type { WorkflowJournalLimits } from '../interfaces/workflows-module-options.interface.js';
 import type { WorkflowEvents } from '../events/workflow-events.service.js';

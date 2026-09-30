@@ -4,7 +4,7 @@
  * defaults a rule takes from DTSTART, and daylight saving changes in Europe/Warsaw (02:00-03:00 skipped on 29 March
  * and repeated on 25 October 2026).
  */
-import { parseRRule, rruleCounts, rruleOccurrences } from '../lib/utils/rrule.util.js';
+import { parseRRule, rruleCounts, rruleOccurrences } from '../../lib/core/scheduling/rrule.util.js';
 
 const NEW_YORK = 'America/New_York';
 const WARSAW = 'Europe/Warsaw';

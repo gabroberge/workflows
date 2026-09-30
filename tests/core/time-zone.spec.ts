@@ -5,7 +5,7 @@
  * and repeats 01:00-02:00 on 1 November; Australia/Lord_Howe moves by 30 minutes, repeating 01:30-02:00 on 5 April
  * and skipping 02:00-02:30 on 4 October.
  */
-import { assertTimeZone, fromWallTime, offsetAt, recentClockChange, toWallTime } from '../lib/utils/time-zone.util.js';
+import { assertTimeZone, fromWallTime, offsetAt, recentClockChange, toWallTime } from '../../lib/core/scheduling/time-zone.util.js';
 
 const MINUTE = 60_000;
 const HOUR = 3_600_000;
