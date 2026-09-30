@@ -24,10 +24,9 @@ const ENTITY_KIND = Symbol.for('drizzle:entityKind');
  * ```
  */
 export function fromDrizzle(db: DrizzleDatabaseLike): SqlExecutor {
-  const kinds = entityKinds(db);
-  if (!kinds.has('PgDatabase') || kinds.has('PgTransaction') || !hasMethod(db, 'execute')) {
+  if (!isDatabase(db) || isTransaction(db) || !hasMethod(db, 'execute')) {
     throw new TypeError(
-      kinds.has('PgTransaction')
+      isTransaction(db)
         ? 'fromDrizzle() takes the database drizzle() returns, not a transaction: pass the tx to start() and signal() as { transaction: tx }.'
         : `fromDrizzle() takes a Drizzle PostgreSQL database (drizzle() of drizzle-orm/node-postgres, /pglite...), got ${describeValue(db)}.`,
     );
@@ -51,9 +50,9 @@ class DrizzleExecutor implements SqlExecutor {
   }
 
   wrapTransaction(transaction: unknown): SqlTransaction {
-    if (!entityKinds(transaction).has('PgTransaction')) {
+    if (!isTransaction(transaction)) {
       throw new TypeError(
-        entityKinds(transaction).has('PgDatabase')
+        isDatabase(transaction)
           ? 'Pass the tx your db.transaction() callback receives, not the database: a statement on the database runs outside your transaction.'
           : `Pass the tx your Drizzle db.transaction() callback receives, got ${describeValue(transaction)}.`,
       );
@@ -84,9 +83,19 @@ async function run<R extends object>(db: DrizzleDatabaseLike, text: string, para
   return (Array.isArray(result) ? result : (result as { rows: R[] }).rows) as R[];
 }
 
-/** The Drizzle class names of `value` and its ancestors: `PgTransaction`, `PgDatabase`... */
-function entityKinds(value: unknown): Set<string> {
-  const kinds = new Set<string>();
+/** A Drizzle PostgreSQL database or transaction: `PgDatabase`, `PgliteDatabase`, `PgAsyncDatabase` (1.0)... */
+function isDatabase(value: unknown): boolean {
+  return entityKinds(value).some((kind) => /^Pg\w*Database$/.test(kind));
+}
+
+/** A Drizzle PostgreSQL transaction: `PgTransaction`, `PgAsyncTransaction` (1.0)... */
+function isTransaction(value: unknown): boolean {
+  return entityKinds(value).some((kind) => /^Pg\w*Transaction$/.test(kind));
+}
+
+/** The Drizzle class names of `value` and its ancestors (`NodePgTransaction`, `PgTransaction`, `PgDatabase`...). */
+function entityKinds(value: unknown): string[] {
+  const kinds: string[] = [];
   if (typeof value !== 'object' || value === null) {
     return kinds;
   }
@@ -94,7 +103,7 @@ function entityKinds(value: unknown): Set<string> {
   for (let type = (value as object).constructor as unknown; typeof type === 'function'; type = Object.getPrototypeOf(type)) {
     const kind = (type as unknown as Record<symbol, unknown>)[ENTITY_KIND];
     if (typeof kind === 'string') {
-      kinds.add(kind);
+      kinds.push(kind);
     }
   }
   return kinds;

@@ -160,6 +160,23 @@ describe('the clients each executor takes', () => {
       Object.assign(MySqlDatabase, { [Symbol.for('drizzle:entityKind')]: 'MySqlDatabase' });
       expect(() => fromDrizzle(new MySqlDatabase() as never)).toThrow('fromDrizzle() takes a Drizzle PostgreSQL database (drizzle() of drizzle-orm/node-postgres, /pglite...), got a MySqlDatabase.');
       expect(() => fromDrizzle({} as never)).toThrow(TypeError);
+
+      // Drizzle 1.0's classes (1.0.0-rc.4): PgAsyncDatabase, and PgAsyncTransaction extending it.
+      const kind = (type: object, name: string) => Object.assign(type, { [Symbol.for('drizzle:entityKind')]: name });
+      class PgAsyncDatabase {
+        execute() {}
+        transaction() {}
+      }
+      class NodePgDatabase extends PgAsyncDatabase {}
+      class PgAsyncTransaction extends PgAsyncDatabase {}
+      class NodePgTransaction extends PgAsyncTransaction {}
+      [[PgAsyncDatabase, 'PgAsyncDatabase'], [NodePgDatabase, 'NodePgDatabase'], [PgAsyncTransaction, 'PgAsyncTransaction'], [NodePgTransaction, 'NodePgTransaction']].forEach(
+        ([type, name]) => kind(type as object, name as string),
+      );
+      const executor = fromDrizzle(new NodePgDatabase() as never);
+      expect(() => executor.wrapTransaction(new NodePgTransaction())).not.toThrow();
+      expect(() => executor.wrapTransaction(new NodePgDatabase())).toThrow('Pass the tx your db.transaction() callback receives, not the database');
+      expect(() => fromDrizzle(new NodePgTransaction() as never)).toThrow('not a transaction');
     } finally {
       await drizzle.close();
     }
